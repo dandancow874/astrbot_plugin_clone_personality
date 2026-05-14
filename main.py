@@ -582,6 +582,8 @@ class ClonePersonalityPlugin(Star):
         success = await self._inject_to_astrbot_persona(
             event, personalities[arg], target_name
         )
+        if success:
+            success = await self._bind_current_conversation_persona(event, arg)
 
         if success:
             yield event.plain_result(
@@ -1340,6 +1342,36 @@ class ClonePersonalityPlugin(Star):
         if hasattr(value, "__await__"):
             return await value
         return value
+
+    async def _bind_current_conversation_persona(self, event: AstrMessageEvent,
+                                                 persona_id: str) -> bool:
+        if not hasattr(self.context, "conversation_manager"):
+            logger.warning("ConversationManager 不可用，无法绑定当前会话人格")
+            return False
+
+        try:
+            conv_mgr = self.context.conversation_manager
+            uid = event.unified_msg_origin
+            try:
+                await self._maybe_await(
+                    conv_mgr.update_conversation(
+                        unified_msg_origin=uid,
+                        conversation_id=None,
+                        persona_id=persona_id,
+                    )
+                )
+            except Exception:
+                await self._maybe_await(
+                    conv_mgr.new_conversation(
+                        unified_msg_origin=uid,
+                        persona_id=persona_id,
+                    )
+                )
+            logger.info(f"已绑定当前会话人格: {uid} -> {persona_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"绑定当前会话人格失败: {e}")
+            return False
 
     def _build_persona_text(self, personality: Dict, target_name: str) -> str:
         lines = [
