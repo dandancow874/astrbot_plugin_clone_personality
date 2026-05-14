@@ -109,7 +109,7 @@ class ClonePersonalityPlugin(Star):
         """
         克隆群友人格。
         群聊用法：克隆 @群友          或   克隆 @群友 -f
-        私聊用法：克隆 <群号> <群友QQ>  或   克隆 <群号> <群友QQ> -f
+        私聊用法：克隆 <群号> <群友QQ/@群友>  或   克隆 <群号> <群友QQ/@群友> -f
         """
         text = event.message_str.strip()
         parts = text.split()
@@ -127,7 +127,7 @@ class ClonePersonalityPlugin(Star):
             if not at_targets:
                 yield event.plain_result(
                     "群聊用法：克隆 @群友\n"
-                    "私聊用法：克隆 <群号> <群友QQ>"
+                    "私聊用法：克隆 <群号> <群友QQ/@群友>"
                 )
                 return
 
@@ -137,29 +137,37 @@ class ClonePersonalityPlugin(Star):
             pid = f"{group_id}_{target_uid}"
 
         else:
-            # 私聊模式：克隆 <群号> <群友QQ>
+            # 私聊模式：克隆 <群号> <群友QQ/@群友>
             non_flag_parts = [p for p in parts if p != "-f" and p != "--force"]
             if len(non_flag_parts) < 3:
                 yield event.plain_result(
-                    "私聊用法：克隆 <群号> <群友QQ>\n"
+                    "私聊用法：克隆 <群号> <群友QQ/@群友>\n"
                     "例如：克隆 123456789 987654321"
                 )
                 return
 
             group_id = non_flag_parts[1]
             target_uid_raw = non_flag_parts[2]
+            at_targets = [
+                comp for comp in event.message_obj.message
+                if isinstance(comp, At)
+            ]
 
             # 校验群号
             if not group_id.isdigit():
                 yield event.plain_result(f"❌ 群号格式错误：{group_id}，应为纯数字")
                 return
-            if not target_uid_raw.isdigit():
+            if target_uid_raw.isdigit():
+                target_uid = target_uid_raw
+                target_name = f"QQ{target_uid}"
+            elif at_targets:
+                target_uid = str(at_targets[0].qq)
+                target_name = at_targets[0].name or str(target_uid)
+            else:
                 yield event.plain_result(f"❌ QQ号格式错误：{target_uid_raw}，应为纯数字")
                 return
 
-            target_uid = target_uid_raw
             group_id = str(int(group_id))  # 标准化
-            target_name = f"QQ{target_uid}"
             pid = f"{group_id}_{target_uid}"
 
         # ── 重复 ID 直接覆盖（不弹提示） ──
@@ -174,6 +182,7 @@ class ClonePersonalityPlugin(Star):
 
             messages = await self._fetch_user_messages(
                 user_id=int(target_uid),
+                group_id=int(group_id),
                 start=start_time.strftime("%Y-%m-%d"),
                 end=end_time.strftime("%Y-%m-%d %H:%M")
             )
@@ -182,6 +191,7 @@ class ClonePersonalityPlugin(Star):
                 start_time = end_time - timedelta(days=90)
                 messages = await self._fetch_user_messages(
                     user_id=int(target_uid),
+                    group_id=int(group_id),
                     start=start_time.strftime("%Y-%m-%d"),
                     end=end_time.strftime("%Y-%m-%d %H:%M")
                 )
@@ -466,8 +476,8 @@ class ClonePersonalityPlugin(Star):
     # 辅助方法
     # ════════════════════════════════════════════════════
 
-    async def _fetch_user_messages(self, user_id: int, start: str,
-                                   end: str) -> List[str]:
+    async def _fetch_user_messages(self, user_id: int, group_id: int,
+                                   start: str, end: str) -> List[str]:
         """获取指定用户的聊天记录"""
         messages = []
 
@@ -475,6 +485,7 @@ class ClonePersonalityPlugin(Star):
             result = await self._search_history(
                 query=None,
                 user_id=user_id,
+                group_id=group_id,
                 start=start,
                 end=end,
                 slice=":100"
@@ -499,7 +510,7 @@ class ClonePersonalityPlugin(Star):
 
         return messages
 
-    async def _search_history(self, query=None, user_id=None,
+    async def _search_history(self, query=None, user_id=None, group_id=None,
                               start=None, end=None, slice=":100"):
         """尝试调用 search_qq_chat_history 工具"""
         try:
@@ -510,6 +521,7 @@ class ClonePersonalityPlugin(Star):
                     params={
                         "query": query,
                         "user_id": user_id,
+                        "group_id": group_id,
                         "start": start,
                         "end": end,
                         "slice": slice
