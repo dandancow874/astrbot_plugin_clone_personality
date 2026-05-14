@@ -162,6 +162,68 @@ class ClonePersonalityPlugin(Star):
         base = re.sub(r"[\\/:*?\"<>|\s]+", "_", base)
         return base or str(target_uid)
 
+    def _get_event_group_id(self, event: AstrMessageEvent) -> Optional[str]:
+        """兼容不同 AstrBot/适配器版本的群号位置。"""
+        candidates = [
+            getattr(event, "group_id", None),
+            getattr(getattr(event, "message_obj", None), "group_id", None),
+        ]
+
+        if hasattr(event, "get_group_id"):
+            try:
+                candidates.append(event.get_group_id())
+            except Exception:
+                pass
+
+        raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if isinstance(raw_message, dict):
+            candidates.append(raw_message.get("group_id"))
+
+        for candidate in candidates:
+            if candidate:
+                value = str(candidate).strip()
+                if value and value.lower() != "none":
+                    return value
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        parts = umo.split(":")
+        if len(parts) >= 3 and "group" in parts[1].lower():
+            return parts[-1]
+
+        return None
+
+    def _extract_at_targets(self, event: AstrMessageEvent) -> List[Dict[str, str]]:
+        """从消息链或日志式文本中提取 At 目标。"""
+        targets = []
+        message_chain = getattr(getattr(event, "message_obj", None), "message", []) or []
+        for comp in message_chain:
+            if isinstance(comp, At):
+                qq = getattr(comp, "qq", None)
+                name = getattr(comp, "name", None)
+            else:
+                qq = (
+                    getattr(comp, "qq", None)
+                    or getattr(comp, "user_id", None)
+                    or getattr(comp, "id", None)
+                )
+                name = getattr(comp, "name", None)
+
+            if qq:
+                targets.append({"qq": str(qq), "name": str(name or qq)})
+                continue
+
+            match = re.search(r"\[At:(\d+)\]", repr(comp))
+            if match:
+                qq = match.group(1)
+                targets.append({"qq": qq, "name": qq})
+
+        text = str(getattr(event, "message_str", "") or "")
+        for qq in re.findall(r"\[At:(\d+)\]", text):
+            if not any(t["qq"] == qq for t in targets):
+                targets.append({"qq": qq, "name": qq})
+
+        return targets
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_text_command(self, event: AstrMessageEvent):
         """
@@ -203,20 +265,22 @@ class ClonePersonalityPlugin(Star):
         force_refresh = "-f" in parts or "--force" in parts
 
         # ── 判断是群聊还是私聊 ──
-        is_group = hasattr(event, 'group_id') and event.group_id
+        event_group_id = self._get_event_group_id(event)
+        is_group = bool(event_group_id)
 
         if is_group:
             # 群聊模式：从 @ 或昵称获取目标
-            at_targets = [
-                comp for comp in event.message_obj.message
-                if isinstance(comp, At)
-            ]
-            group_id = str(event.group_id)
+            at_targets = self._extract_at_targets(event)
+            group_id = str(event_group_id)
             target_arg = self._extract_clone_target_arg(parts)
 
             if at_targets:
-                target_uid = at_targets[0].qq
-                target_name = at_targets[0].name or str(target_uid)
+                target_uid = at_targets[0]["qq"]
+                target_name = await self._get_group_member_display_name(
+                    event,
+                    int(group_id),
+                    target_uid,
+                ) or at_targets[0]["name"] or str(target_uid)
             elif target_arg:
                 target_uid = await self._resolve_group_member_id(
                     event,
@@ -251,10 +315,7 @@ class ClonePersonalityPlugin(Star):
 
             group_id = non_flag_parts[1]
             target_uid_raw = non_flag_parts[2]
-            at_targets = [
-                comp for comp in event.message_obj.message
-                if isinstance(comp, At)
-            ]
+            at_targets = self._extract_at_targets(event)
 
             # 校验群号
             if not group_id.isdigit():
@@ -262,10 +323,18 @@ class ClonePersonalityPlugin(Star):
                 return
             if target_uid_raw.isdigit():
                 target_uid = target_uid_raw
-                target_name = f"QQ{target_uid}"
+                target_name = await self._get_group_member_display_name(
+                    event,
+                    int(group_id),
+                    target_uid,
+                ) or f"QQ{target_uid}"
             elif at_targets:
-                target_uid = str(at_targets[0].qq)
-                target_name = at_targets[0].name or str(target_uid)
+                target_uid = str(at_targets[0]["qq"])
+                target_name = await self._get_group_member_display_name(
+                    event,
+                    int(group_id),
+                    target_uid,
+                ) or at_targets[0]["name"] or str(target_uid)
             elif target_uid_raw.startswith("@"):
                 target_uid = await self._resolve_group_member_id(
                     event,
@@ -757,6 +826,32 @@ class ClonePersonalityPlugin(Star):
                 candidates.append(str(user_id))
 
         return candidates[0] if len(candidates) == 1 else None
+
+    async def _get_group_member_display_name(self, event, group_id: int,
+                                             user_id: Any) -> Optional[str]:
+        if not hasattr(event, "bot") or not hasattr(event.bot, "api"):
+            return None
+
+        try:
+            result = await event.bot.api.call_action(
+                "get_group_member_info",
+                group_id=group_id,
+                user_id=int(user_id),
+                no_cache=False,
+            )
+        except Exception as e:
+            logger.debug(f"get_group_member_info 调用失败: {e}")
+            return None
+
+        data = result.get("data", result) if isinstance(result, dict) else {}
+        if not isinstance(data, dict):
+            return None
+
+        for key in ("card", "nickname", "remark"):
+            value = str(data.get(key, "")).strip()
+            if value:
+                return value
+        return None
 
     async def _search_history(self, query=None, user_id=None, group_id=None,
                               start=None, end=None, slice=":100"):
