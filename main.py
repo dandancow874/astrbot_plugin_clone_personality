@@ -908,6 +908,8 @@ class ClonePersonalityPlugin(Star):
                 text = self._extract_plain_text_from_raw_message(item)
                 if not text:
                     continue
+                if self._is_plugin_command_text(text):
+                    continue
 
                 if sender_id == str(user_id):
                     texts.append(text)
@@ -1253,6 +1255,19 @@ class ClonePersonalityPlugin(Star):
 
     def _strip_bot_mentions(self, text: str) -> str:
         return re.sub(r"\[At:\d+\]", "", text).strip()
+
+    def _is_plugin_command_text(self, text: str) -> bool:
+        text = self._strip_bot_mentions(str(text or "")).strip()
+        command_names = (
+            "克隆",
+            "clone",
+            "人格切换",
+            "人格列表",
+            "人格详情",
+            "人格删除",
+            "管理员注入开关",
+        )
+        return any(text == cmd or text.startswith(f"{cmd} ") for cmd in command_names)
 
     def _build_persona_result_message(self, pid: str, persona_name: str,
                                       target_name: str, message_count: int,
