@@ -495,7 +495,7 @@ class ClonePersonalityPlugin(Star):
         personalities = load_personalities()
 
         # ── 获取聊天记录 ──
-        yield event.plain_result(f"🫳 一把抓住 {target_name}(群 {group_id})，顷刻炼化...")
+        yield event.plain_result(f"🤏 一把抓住 {target_name}(群 {group_id})，顷刻炼化...")
 
         try:
             end_time = datetime.now()
@@ -881,6 +881,7 @@ class ClonePersonalityPlugin(Star):
         texts = []
         peer_mentions = []
         message_seq = 0
+        bot_id = self._get_bot_self_id(event)
         for _ in range(max_rounds):
             try:
                 result = await event.bot.api.call_action(
@@ -902,6 +903,8 @@ class ClonePersonalityPlugin(Star):
             for item in group_messages:
                 sender = item.get("sender", {}) if isinstance(item, dict) else {}
                 sender_id = str(sender.get("user_id", ""))
+                if bot_id and sender_id == str(bot_id):
+                    continue
                 text = self._extract_plain_text_from_raw_message(item)
                 if not text:
                     continue
