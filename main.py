@@ -146,9 +146,15 @@ class ClonePersonalityPlugin(Star):
         except Exception:
             pass
 
-    def _extract_clone_target_arg(self, parts: List[str]) -> Optional[str]:
+    def _extract_clone_target_arg(self, parts: List[str],
+                                  skip_values: Optional[List[str]] = None
+                                  ) -> Optional[str]:
+        skip_values = skip_values or []
         for part in parts[1:]:
             if part in ("-f", "--force"):
+                continue
+            normalized = part.strip()
+            if normalized in skip_values:
                 continue
             return part.strip()
         return None
@@ -224,6 +230,35 @@ class ClonePersonalityPlugin(Star):
 
         return targets
 
+    def _get_bot_self_id(self, event: AstrMessageEvent) -> Optional[str]:
+        candidates = [
+            getattr(getattr(event, "message_obj", None), "self_id", None),
+            getattr(event, "self_id", None),
+        ]
+
+        if hasattr(event, "get_self_id"):
+            try:
+                candidates.append(event.get_self_id())
+            except Exception:
+                pass
+
+        raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if isinstance(raw_message, dict):
+            candidates.append(raw_message.get("self_id"))
+
+        for candidate in candidates:
+            if candidate:
+                value = str(candidate).strip()
+                if value and value.lower() != "none":
+                    return value
+        return None
+
+    def _is_bot_mentioned(self, event: AstrMessageEvent) -> bool:
+        bot_id = self._get_bot_self_id(event)
+        if not bot_id:
+            return False
+        return any(target["qq"] == bot_id for target in self._extract_at_targets(event))
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_text_command(self, event: AstrMessageEvent):
         """
@@ -232,6 +267,8 @@ class ClonePersonalityPlugin(Star):
         """
         text = event.message_str.strip()
         if not text or text.startswith("/"):
+            return
+        if self._get_event_group_id(event) and not self._is_bot_mentioned(event):
             return
 
         handlers = (
@@ -267,12 +304,19 @@ class ClonePersonalityPlugin(Star):
         # ── 判断是群聊还是私聊 ──
         event_group_id = self._get_event_group_id(event)
         is_group = bool(event_group_id)
+        if is_group and not self._is_bot_mentioned(event):
+            return
 
         if is_group:
             # 群聊模式：从 @ 或昵称获取目标
-            at_targets = self._extract_at_targets(event)
+            bot_id = self._get_bot_self_id(event)
+            at_targets = [
+                target for target in self._extract_at_targets(event)
+                if not bot_id or target["qq"] != bot_id
+            ]
             group_id = str(event_group_id)
-            target_arg = self._extract_clone_target_arg(parts)
+            skip_values = [f"[At:{bot_id}]"] if bot_id else []
+            target_arg = self._extract_clone_target_arg(parts, skip_values)
 
             if at_targets:
                 target_uid = at_targets[0]["qq"]
@@ -453,7 +497,8 @@ class ClonePersonalityPlugin(Star):
         else:
             summary += f"\n\n[系统] 人格已保存，当前设置为仅管理员可创建/更新 AstrBot 人格。"
 
-        yield event.plain_result(summary)
+        if not await self._send_forward_message(event, group_id, summary):
+            yield event.plain_result(summary)
 
     # ════════════════════════════════════════════════════
     # 2. 管理员注入开关
@@ -880,24 +925,51 @@ class ClonePersonalityPlugin(Star):
 
 要求：
 1. 严格基于提供的聊天记录进行分析
-2. 分析要具体、生动、有血有肉
-3. 不要泛泛而谈，要给出具体特征
+2. 分析要具体、生动、有血有肉，像一份可直接放进机器人人格设定里的模板
+3. 不要泛泛而谈，要给出具体特征、触发条件、反应模式和边界
+4. “骚话/爆点语录/行为范例”必须尽量摘原始聊天里的原话，不要为了好看自行编造
+5. 如果原始聊天里没有足够爆点语录，可以少写，但不要伪造
 
 请按以下 JSON 格式输出（不要包含其他内容，只输出 JSON）：
 {{
-    "summary": "一段生动的人格摘要（150-250字），描述此人的核心特点、价值取向、社交姿态和典型反应",
-    "traits": {{
-        "性格倾向": "如：外向开朗 / 内敛沉稳 / 毒舌幽默 / 温和友善 等",
-        "情绪稳定性": "如：情绪稳定 / 容易激动 / 喜怒无常 等",
-        "思维风格": "如：理性逻辑 / 感性发散 / 天马行空 / 务实接地气 等",
-        "社交角色": "如：话题发起者 / 捧场王 / 冷场终结者 / 潜水窥屏 等"
-    }},
-    "speaking_style": "描述其独特的说话风格（80-150字），包括语气、用词习惯、句式特点、吐槽方式、反问方式等",
-    "common_phrases": ["常用口头禅或高频短语（最多8个）"],
+    "identity": "你现在的身份是QQ用户“{target_name}”。用一段 150-260 字描述TA是谁、圈层、性别/年龄感（只能推测时要含蓄）、核心气质、社交位置和最鲜明的人格反差。",
+    "summary": "人格核心：一段 180-300 字的总述，描述其核心矛盾、价值取向、社交姿态、情绪底色和典型反应。",
+    "speaking_style": [
+        "说话风格与习惯 1",
+        "说话风格与习惯 2",
+        "说话风格与习惯 3",
+        "说话风格与习惯 4",
+        "说话风格与习惯 5"
+    ],
+    "values_and_boundaries": [
+        "价值倾向与社交边界 1",
+        "价值倾向与社交边界 2",
+        "价值倾向与社交边界 3",
+        "价值倾向与社交边界 4"
+    ],
+    "trigger_reactions": [
+        "当遇到某类话题/情境时：会如何反应",
+        "当遇到某类话题/情境时：会如何反应",
+        "当遇到某类话题/情境时：会如何反应",
+        "当遇到某类话题/情境时：会如何反应",
+        "当遇到某类话题/情境时：会如何反应"
+    ],
+    "common_phrases": ["常用口头禅或高频短语（最多10个）"],
+    "signature_quotes": ["从原始聊天记录中摘出的代表性原话、骚话或有爆点的话（5-10条，必须是原话，不要改写）"],
+    "behavior_examples": [
+        "当某情境出现时，你会说：引用或贴近原话的行为范例",
+        "当某情境出现时，你会说：引用或贴近原话的行为范例",
+        "当某情境出现时，你会说：引用或贴近原话的行为范例"
+    ],
+    "avoidances": [
+        "禁止项 1",
+        "禁止项 2",
+        "禁止项 3",
+        "禁止项 4"
+    ],
+    "traits": {{}},
     "interests": ["从聊天中推断的兴趣爱好或话题偏好（最多8个）"],
-    "emotional_pattern": "描述其情绪表达模式（60-120字），比如是否爱用表情包、语气词、脏话、阴阳怪气、冷处理等",
-    "reply_rules": ["模仿该人格回复时应遵守的具体规则（5-8条）"],
-    "avoidances": ["不符合该人格的表达方式或话题处理方式（3-5条）"]
+    "emotional_pattern": "情绪模式：描述其情绪表达、脆弱点、攻击性、玩梗节奏或亲密关系里的反差。"
 }}
 
 以下是 "{target_name}" 的聊天记录：
@@ -993,46 +1065,122 @@ class ClonePersonalityPlugin(Star):
             f"人格ID：{pid}",
             f"目标：{target_name}",
             f"分析消息数：{message_count} 条",
-            "",
-            "人格摘要",
-            str(personality.get("summary", "")).strip() or "无",
         ]
 
-        traits = personality.get("traits", {})
-        if traits:
-            lines.extend(["", "性格特征"])
-            for key, value in traits.items():
-                lines.append(f"{key}：{value}")
+        identity = str(personality.get("identity", "")).strip()
+        if identity:
+            lines.extend(["", identity])
 
-        style = str(personality.get("speaking_style", "")).strip()
-        if style:
-            lines.extend(["", "说话风格", style])
+        summary = str(personality.get("summary", "")).strip()
+        if summary:
+            lines.extend(["", summary])
+
+        self._append_numbered_section(
+            lines,
+            "说话风格与习惯",
+            personality.get("speaking_style", []),
+        )
+        self._append_numbered_section(
+            lines,
+            "价值倾向与社交边界",
+            personality.get("values_and_boundaries", []),
+        )
+        self._append_numbered_section(
+            lines,
+            "触发条件与反应模式",
+            personality.get("trigger_reactions", []),
+        )
 
         phrases = personality.get("common_phrases", [])
         if phrases:
-            lines.extend(["", "常用表达"])
+            lines.extend(["", "高频表达特征"])
             lines.extend([f"- {phrase}" for phrase in phrases])
 
-        interests = personality.get("interests", [])
-        if interests:
-            lines.extend(["", "关注话题"])
-            lines.extend([f"- {item}" for item in interests])
+        quotes = personality.get("signature_quotes", [])
+        if quotes:
+            lines.extend(["", "骚话 / 爆点语录"])
+            lines.extend([f"- {quote}" for quote in quotes])
 
-        pattern = str(personality.get("emotional_pattern", "")).strip()
-        if pattern:
-            lines.extend(["", "情绪模式", pattern])
+        self._append_numbered_section(
+            lines,
+            "行为范例",
+            personality.get("behavior_examples", []),
+        )
 
-        rules = personality.get("reply_rules", [])
-        if rules:
-            lines.extend(["", "回复规则"])
-            lines.extend([f"- {item}" for item in rules])
-
-        avoidances = personality.get("avoidances", [])
-        if avoidances:
-            lines.extend(["", "避免事项"])
-            lines.extend([f"- {item}" for item in avoidances])
+        self._append_numbered_section(
+            lines,
+            "禁止项",
+            personality.get("avoidances", []),
+        )
 
         return "\n".join(lines)
+
+    def _append_numbered_section(self, lines: List[str], title: str,
+                                 items: Any) -> None:
+        if isinstance(items, str):
+            items = [items] if items.strip() else []
+        if not items:
+            return
+
+        lines.extend(["", title])
+        for idx, item in enumerate(items, 1):
+            lines.append(f"{idx}. {item}")
+
+    async def _send_forward_message(self, event: AstrMessageEvent,
+                                    group_id: str, text: str) -> bool:
+        """优先用 QQ 合并转发发送长人格分析。"""
+        if not hasattr(event, "bot") or not hasattr(event.bot, "api"):
+            return False
+
+        try:
+            nodes = self._build_forward_nodes(text)
+            event_group_id = self._get_event_group_id(event)
+
+            if event_group_id:
+                await event.bot.api.call_action(
+                    "send_group_forward_msg",
+                    group_id=int(group_id),
+                    messages=nodes,
+                )
+                return True
+
+            sender_id = event.get_sender_id() if hasattr(event, "get_sender_id") else None
+            if sender_id:
+                await event.bot.api.call_action(
+                    "send_private_forward_msg",
+                    user_id=int(sender_id),
+                    messages=nodes,
+                )
+                return True
+        except Exception as e:
+            logger.warning(f"发送合并转发失败，回退普通文本: {e}")
+
+        return False
+
+    def _build_forward_nodes(self, text: str) -> List[Dict[str, Any]]:
+        sections = [s.strip() for s in re.split(r"\n{2,}", text) if s.strip()]
+        if not sections:
+            sections = [text]
+
+        nodes = []
+        for idx, section in enumerate(sections, 1):
+            title = "人格分析" if idx == 1 else "人格分析续"
+            nodes.append({
+                "type": "node",
+                "data": {
+                    "name": title,
+                    "uin": "10000",
+                    "content": [
+                        {
+                            "type": "text",
+                            "data": {
+                                "text": section,
+                            },
+                        }
+                    ],
+                },
+            })
+        return nodes
 
     def _parse_llm_response(self, resp) -> Optional[Dict]:
         """解析 LLM 返回的 JSON 人格数据"""
@@ -1055,9 +1203,14 @@ class ClonePersonalityPlugin(Star):
 
         return {
             "summary": text[:200] if text else "分析失败",
+            "identity": "",
             "traits": {},
             "speaking_style": "",
             "common_phrases": [],
+            "signature_quotes": [],
+            "values_and_boundaries": [],
+            "trigger_reactions": [],
+            "behavior_examples": [],
             "interests": [],
             "emotional_pattern": "",
             "reply_rules": [],
@@ -1165,6 +1318,10 @@ class ClonePersonalityPlugin(Star):
         if summary:
             lines.append(f"\n【人格摘要】\n{summary}")
 
+        identity = personality.get("identity", "")
+        if identity:
+            lines.append(f"\n【身份设定】\n{identity}")
+
         traits = personality.get("traits", {})
         if traits:
             lines.append("\n【性格特征】")
@@ -1173,11 +1330,40 @@ class ClonePersonalityPlugin(Star):
 
         style = personality.get("speaking_style", "")
         if style:
-            lines.append(f"\n【说话风格】\n{style}")
+            lines.append("\n【说话风格与习惯】")
+            if isinstance(style, list):
+                for idx, item in enumerate(style, 1):
+                    lines.append(f"{idx}. {item}")
+            else:
+                lines.append(str(style))
+
+        values = personality.get("values_and_boundaries", [])
+        if values:
+            lines.append("\n【价值倾向与社交边界】")
+            for idx, item in enumerate(values, 1):
+                lines.append(f"{idx}. {item}")
+
+        triggers = personality.get("trigger_reactions", [])
+        if triggers:
+            lines.append("\n【触发条件与反应模式】")
+            for idx, item in enumerate(triggers, 1):
+                lines.append(f"{idx}. {item}")
 
         phrases = personality.get("common_phrases", [])
         if phrases:
             lines.append(f"\n【常用表达】\n{' '.join(phrases)}")
+
+        quotes = personality.get("signature_quotes", [])
+        if quotes:
+            lines.append("\n【骚话 / 爆点语录】")
+            for item in quotes:
+                lines.append(f"- {item}")
+
+        examples = personality.get("behavior_examples", [])
+        if examples:
+            lines.append("\n【行为范例】")
+            for idx, item in enumerate(examples, 1):
+                lines.append(f"{idx}. {item}")
 
         interests = personality.get("interests", [])
         if interests:
