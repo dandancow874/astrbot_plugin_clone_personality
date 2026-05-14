@@ -366,6 +366,8 @@ class ClonePersonalityPlugin(Star):
         persona_text = self._build_persona_text(personality, target_name)
         req.system_prompt = (
             f"{persona_text}\n\n"
+            "【回复长度硬约束】默认 1-3 句，80 字以内；"
+            "除非用户明确要求详细、展开、分条，否则不要 Markdown 分点，不要长篇锐评，不要总结式小作文。\n\n"
             f"{req.system_prompt or ''}"
         )
         logger.info(f"已将会话人格注入 LLM 请求: {persona_id}")
@@ -502,7 +504,6 @@ class ClonePersonalityPlugin(Star):
             initial_days = int(self._get_setting("message.initial_days", 30))
             fallback_days = int(self._get_setting("message.fallback_days", 90))
             history_slice = str(self._get_setting("message.history_slice", ":100"))
-            peer_mentions = []
 
             start_time = end_time - timedelta(days=initial_days)
 
@@ -516,7 +517,6 @@ class ClonePersonalityPlugin(Star):
                 slice=history_slice,
             )
             if isinstance(messages, dict):
-                peer_mentions = messages.get("peer_mentions", [])
                 messages = messages.get("messages", [])
 
             if not messages:
@@ -531,7 +531,6 @@ class ClonePersonalityPlugin(Star):
                     slice=history_slice,
                 )
                 if isinstance(messages, dict):
-                    peer_mentions = messages.get("peer_mentions", [])
                     messages = messages.get("messages", [])
 
             if not messages:
@@ -553,7 +552,6 @@ class ClonePersonalityPlugin(Star):
             event,
             messages,
             target_name,
-            peer_mentions=peer_mentions,
         )
         if not personality:
             yield event.plain_result("❌ 人格分析失败，请稍后重试。")
@@ -566,7 +564,6 @@ class ClonePersonalityPlugin(Star):
         personality["group_id"] = str(group_id)
         personality["created_at"] = datetime.now().isoformat()
         personality["message_count"] = len(messages)
-        personality["peer_mention_count"] = len(peer_mentions)
 
         personalities[pid] = personality
         save_personalities(personalities)
@@ -872,14 +869,13 @@ class ClonePersonalityPlugin(Star):
                                                       target_name: str) -> Dict[str, List[str]]:
         """通过 aiocqhttp/OneBot 的 get_group_msg_history 扫描群历史。"""
         if not hasattr(event, "bot") or not hasattr(event.bot, "api"):
-            return {"messages": [], "peer_mentions": []}
+            return {"messages": []}
 
         max_rounds = int(self._get_setting("message.max_fetch_rounds", 50))
         per_query_count = int(self._get_setting("message.per_query_count", 200))
         max_count = int(self._get_setting("message.max_analysis_messages", 80))
 
         texts = []
-        peer_mentions = []
         message_seq = 0
         bot_id = self._get_bot_self_id(event)
         for _ in range(max_rounds):
@@ -893,7 +889,7 @@ class ClonePersonalityPlugin(Star):
                 )
             except Exception as e:
                 logger.debug(f"get_group_msg_history 调用失败: {e}")
-                return {"messages": [], "peer_mentions": []}
+                return {"messages": []}
 
             group_messages = result.get("messages", []) if isinstance(result, dict) else []
             if not group_messages:
@@ -914,46 +910,12 @@ class ClonePersonalityPlugin(Star):
                 if sender_id == str(user_id):
                     texts.append(text)
                     if len(texts) >= max_count:
-                        continue
-                elif self._is_peer_mention_about_target(item, text, user_id, target_name):
-                    sender_name = (
-                        str(sender.get("card", "")).strip()
-                        or str(sender.get("nickname", "")).strip()
-                        or sender_id
-                    )
-                    peer_mentions.append(f"{sender_name}: {text}")
+                        break
 
-            if len(texts) >= max_count and len(peer_mentions) >= 20:
+            if len(texts) >= max_count:
                 break
 
-        return {"messages": texts[:max_count], "peer_mentions": peer_mentions[:20]}
-
-    def _is_peer_mention_about_target(self, item: Dict[str, Any], text: str,
-                                      user_id: int, target_name: str) -> bool:
-        if self._raw_message_mentions_user(item, user_id):
-            return True
-
-        target_name = str(target_name or "").strip()
-        if target_name and len(target_name) >= 2 and target_name in text:
-            return True
-
-        return False
-
-    def _raw_message_mentions_user(self, item: Dict[str, Any], user_id: int) -> bool:
-        raw_message = item.get("message", "")
-        uid = str(user_id)
-        if isinstance(raw_message, str):
-            return f"[CQ:at,qq={uid}]" in raw_message or f"[At:{uid}]" in raw_message
-        if not isinstance(raw_message, list):
-            return False
-
-        for seg in raw_message:
-            if not isinstance(seg, dict) or seg.get("type") != "at":
-                continue
-            data = seg.get("data", {})
-            if isinstance(data, dict) and str(data.get("qq", "")) == uid:
-                return True
-        return False
+        return {"messages": texts[:max_count]}
 
     def _extract_plain_text_from_raw_message(self, item: Dict[str, Any]) -> str:
         raw_message = item.get("message", "")
@@ -1068,14 +1030,10 @@ class ClonePersonalityPlugin(Star):
         return []
 
     async def _analyze_personality(self, event, messages: List[str],
-                                   target_name: str,
-                                   peer_mentions: Optional[List[str]] = None
-                                   ) -> Optional[Dict]:
+                                   target_name: str) -> Optional[Dict]:
         """调用大模型分析人格特征"""
         sample = self._prepare_analysis_messages(messages)
         chat_text = "\n".join([f"- {m}" for m in sample])
-        peer_sample = self._prepare_analysis_messages(peer_mentions or [])
-        peer_text = "\n".join([f"- {m}" for m in peer_sample])
 
         prompt = f"""你是一位人格分析专家。请分析以下 "{target_name}" 的聊天记录，提取其人格特征。
 
@@ -1086,7 +1044,6 @@ class ClonePersonalityPlugin(Star):
 4. “骚话/爆点语录/行为范例”必须尽量摘原始聊天里的原话，不要为了好看自行编造
 5. 骚话/爆点语录宁缺毋滥：只有明显有梗、有攻击性、有反差、有抽象感、有口癖或有传播感的句子才收录；普通陈述、无趣吐槽、泛泛观点不要硬凑
 6. 如果原始聊天里没有足够爆点语录，signature_quotes 返回空数组 []，不要为了凑数量填普通句子
-7. 他人评价也宁缺毋滥：只有别人明确点名、@TA、评价TA性格/行为/能力/癖好/群内定位时才写；普通回复、无评价内容的互动不要硬凑
 
 请按以下 JSON 格式输出（不要包含其他内容，只输出 JSON）：
 {{
@@ -1119,9 +1076,6 @@ class ClonePersonalityPlugin(Star):
         "当某情境出现时，你会说：引用或贴近原话的行为范例",
         "当某情境出现时，你会说：引用或贴近原话的行为范例"
     ],
-    "peer_evaluations": [
-        "别人对TA的明确评价或群内定位（0-5条，只能基于下面的他人提及材料；没有就返回空数组）"
-    ],
     "avoidances": [
         "禁止项 1",
         "禁止项 2",
@@ -1135,9 +1089,6 @@ class ClonePersonalityPlugin(Star):
 
 以下是 "{target_name}" 的聊天记录：
 {chat_text}
-
-以下是群里其他人提到或 @ "{target_name}" 的消息（用于分析他人评价；如果没有明确评价就忽略）：
-{peer_text if peer_text else "- 无"}
 """
 
         try:
@@ -1244,7 +1195,8 @@ class ClonePersonalityPlugin(Star):
         prompt = (
             f"{persona_prompt}\n\n"
             f"用户消息：{text}\n\n"
-            f"直接回这一句。短一点，像群友聊天，不要说明你是AI，不要解释人格设定。"
+            f"直接回这一句。默认 1-3 句，80 字以内，像群友聊天。"
+            f"不要说明你是AI，不要解释人格设定，不要分点写小作文。"
         )
 
         resp = await self._call_llm(event, prompt)
@@ -1319,12 +1271,6 @@ class ClonePersonalityPlugin(Star):
             "行为范例",
             personality.get("behavior_examples", []),
         )
-        self._append_numbered_section(
-            lines,
-            "他人评价",
-            personality.get("peer_evaluations", []),
-        )
-
         self._append_numbered_section(
             lines,
             "禁止项",
@@ -1429,7 +1375,6 @@ class ClonePersonalityPlugin(Star):
             "values_and_boundaries": [],
             "trigger_reactions": [],
             "behavior_examples": [],
-            "peer_evaluations": [],
             "interests": [],
             "emotional_pattern": "",
             "reply_rules": [],
@@ -1440,8 +1385,6 @@ class ClonePersonalityPlugin(Star):
         data["signature_quotes"] = self._filter_signature_quotes(
             data.get("signature_quotes", [])
         )
-        if not isinstance(data.get("peer_evaluations", []), list):
-            data["peer_evaluations"] = []
         return data
 
     def _filter_signature_quotes(self, quotes: Any) -> List[str]:
@@ -1595,7 +1538,8 @@ class ClonePersonalityPlugin(Star):
         lines = [
             f"你现在就按 {target_name} 的群聊口吻说话。\n"
             "像真人群友一样短句回复，别自我介绍，别解释设定，别科普腔。\n"
-            "能一句话说完就别展开；除非用户明确问技术细节，否则不要长篇分析。"
+            "默认只回 1-3 句，尽量 80 字以内。\n"
+            "除非用户明确说“详细说”“展开”“分条”“认真分析”，否则禁止长篇、禁止 Markdown 分点、禁止总结式小作文。"
         ]
 
         summary = personality.get("summary", "")
@@ -1647,12 +1591,6 @@ class ClonePersonalityPlugin(Star):
         if examples:
             lines.append("\n【行为范例】")
             for idx, item in enumerate(examples, 1):
-                lines.append(f"{idx}. {item}")
-
-        peer_evaluations = personality.get("peer_evaluations", [])
-        if peer_evaluations:
-            lines.append("\n【他人评价】")
-            for idx, item in enumerate(peer_evaluations, 1):
                 lines.append(f"{idx}. {item}")
 
         interests = personality.get("interests", [])
