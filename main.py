@@ -22,6 +22,7 @@ from astrbot.api import logger
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 PERSONALITIES_FILE = os.path.join(PLUGIN_DIR, "personalities.json")
 ACTIVE_PERSONA_FILE = os.path.join(PLUGIN_DIR, "active_persona.txt")
+ACTIVE_SESSIONS_FILE = os.path.join(PLUGIN_DIR, "active_sessions.json")
 CONFIG_FILE = os.path.join(PLUGIN_DIR, "config.json")
 
 
@@ -96,6 +97,21 @@ def set_active_persona(persona_id: Optional[str]):
     else:
         if os.path.exists(ACTIVE_PERSONA_FILE):
             os.remove(ACTIVE_PERSONA_FILE)
+
+
+def load_active_sessions() -> Dict[str, str]:
+    if os.path.exists(ACTIVE_SESSIONS_FILE):
+        try:
+            with open(ACTIVE_SESSIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            logger.warning("会话人格数据文件损坏，重置为空")
+    return {}
+
+
+def save_active_sessions(data: Dict[str, str]):
+    with open(ACTIVE_SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ─── 主插件类 ────────────────────────────────────────────
@@ -259,6 +275,27 @@ class ClonePersonalityPlugin(Star):
             return False
         return any(target["qq"] == bot_id for target in self._extract_at_targets(event))
 
+    def _get_session_key(self, event: AstrMessageEvent) -> str:
+        return str(getattr(event, "unified_msg_origin", "") or "")
+
+    def _get_session_active_persona(self, event: AstrMessageEvent) -> Optional[str]:
+        key = self._get_session_key(event)
+        if not key:
+            return None
+        return load_active_sessions().get(key)
+
+    def _set_session_active_persona(self, event: AstrMessageEvent,
+                                    persona_id: Optional[str]) -> None:
+        key = self._get_session_key(event)
+        if not key:
+            return
+        sessions = load_active_sessions()
+        if persona_id:
+            sessions[key] = persona_id
+        else:
+            sessions.pop(key, None)
+        save_active_sessions(sessions)
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_text_command(self, event: AstrMessageEvent):
         """
@@ -285,6 +322,9 @@ class ClonePersonalityPlugin(Star):
                     yield result
                 event.stop_event()
                 return
+
+        async for result in self._handle_active_persona_chat(event):
+            yield result
 
     # ════════════════════════════════════════════════════
     # 1. 克隆指令
@@ -563,6 +603,7 @@ class ClonePersonalityPlugin(Star):
 
         if arg.lower() in ("default", "默认"):
             set_active_persona(None)
+            self._set_session_active_persona(event, None)
             yield event.plain_result("🔄 已恢复为默认人格。")
             return
 
@@ -576,6 +617,7 @@ class ClonePersonalityPlugin(Star):
             return
 
         set_active_persona(arg)
+        self._set_session_active_persona(event, arg)
         target_name = personalities[arg].get("user_name", arg)
         summary_text = personalities[arg].get("summary", "")
 
@@ -1058,6 +1100,41 @@ class ClonePersonalityPlugin(Star):
         if hasattr(event, 'llm'):
             return await event.llm.text_chat(prompt)
         return None
+
+    async def _handle_active_persona_chat(self, event: AstrMessageEvent):
+        event_group_id = self._get_event_group_id(event)
+        if event_group_id and not self._is_bot_mentioned(event):
+            return
+
+        persona_id = self._get_session_active_persona(event)
+        if not persona_id:
+            return
+
+        personalities = load_personalities()
+        personality = personalities.get(persona_id)
+        if not personality:
+            return
+
+        text = self._strip_bot_mentions(event.message_str.strip())
+        if not text:
+            return
+
+        target_name = personality.get("user_name", persona_id)
+        persona_prompt = self._build_persona_text(personality, target_name)
+        prompt = (
+            f"{persona_prompt}\n\n"
+            f"用户消息：{text}\n\n"
+            f"请直接以该人格回复用户。不要说明你是AI，不要解释人格设定。"
+        )
+
+        resp = await self._call_llm(event, prompt)
+        reply = self._extract_llm_text(resp)
+        if reply:
+            event.stop_event()
+            yield event.plain_result(reply)
+
+    def _strip_bot_mentions(self, text: str) -> str:
+        return re.sub(r"\[At:\d+\]", "", text).strip()
 
     def _build_persona_result_message(self, pid: str, persona_name: str,
                                       target_name: str, message_count: int,
