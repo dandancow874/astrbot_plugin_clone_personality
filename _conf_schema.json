@@ -42,6 +42,27 @@
         "type": "string",
         "default": ":100"
       },
+      "max_fetch_rounds": {
+        "description": "群历史最大扫描轮数",
+        "hint": "每轮调用一次 get_group_msg_history。调大可以扫更多历史，但会更慢。",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 200,
+          "step": 1
+        },
+        "default": 50
+      },
+      "per_query_count": {
+        "description": "每轮拉取群消息条数",
+        "type": "int",
+        "slider": {
+          "min": 20,
+          "max": 200,
+          "step": 10
+        },
+        "default": 200
+      },
       "max_analysis_messages": {
         "description": "用于分析的最大消息条数",
         "hint": "越大越准，但更消耗上下文和 Token",

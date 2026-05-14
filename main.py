@@ -35,6 +35,8 @@ DEFAULT_CONFIG = {
         "initial_days": 30,
         "fallback_days": 90,
         "history_slice": ":100",
+        "max_fetch_rounds": 50,
+        "per_query_count": 200,
         "max_analysis_messages": 80,
         "max_message_chars": 180,
         "max_prompt_chars": 12000,
@@ -232,6 +234,18 @@ class ClonePersonalityPlugin(Star):
             elif at_targets:
                 target_uid = str(at_targets[0].qq)
                 target_name = at_targets[0].name or str(target_uid)
+            elif target_uid_raw.startswith("@"):
+                target_uid = await self._resolve_group_member_id(
+                    event,
+                    int(group_id),
+                    target_uid_raw[1:],
+                )
+                if not target_uid:
+                    yield event.plain_result(
+                        f"❌ 无法从 {target_uid_raw} 识别 QQ号，请改用：克隆 {group_id} <QQ号>"
+                    )
+                    return
+                target_name = target_uid_raw[1:] or f"QQ{target_uid}"
             else:
                 yield event.plain_result(f"❌ QQ号格式错误：{target_uid_raw}，应为纯数字")
                 return
@@ -254,6 +268,7 @@ class ClonePersonalityPlugin(Star):
             start_time = end_time - timedelta(days=initial_days)
 
             messages = await self._fetch_user_messages(
+                event=event,
                 user_id=int(target_uid),
                 group_id=int(group_id),
                 start=start_time.strftime("%Y-%m-%d"),
@@ -264,6 +279,7 @@ class ClonePersonalityPlugin(Star):
             if not messages:
                 start_time = end_time - timedelta(days=fallback_days)
                 messages = await self._fetch_user_messages(
+                    event=event,
                     user_id=int(target_uid),
                     group_id=int(group_id),
                     start=start_time.strftime("%Y-%m-%d"),
@@ -551,13 +567,21 @@ class ClonePersonalityPlugin(Star):
     # 辅助方法
     # ════════════════════════════════════════════════════
 
-    async def _fetch_user_messages(self, user_id: int, group_id: int,
+    async def _fetch_user_messages(self, event, user_id: int, group_id: int,
                                    start: str, end: str,
                                    slice: str = ":100") -> List[str]:
         """获取指定用户的聊天记录"""
         messages = []
 
         try:
+            messages = await self._fetch_user_messages_from_group_history(
+                event,
+                user_id=user_id,
+                group_id=group_id,
+            )
+            if messages:
+                return messages
+
             result = await self._search_history(
                 query=None,
                 user_id=user_id,
@@ -585,6 +609,106 @@ class ClonePersonalityPlugin(Star):
             logger.error(f"获取用户消息失败: {e}")
 
         return messages
+
+    async def _fetch_user_messages_from_group_history(self, event, user_id: int,
+                                                      group_id: int) -> List[str]:
+        """通过 aiocqhttp/OneBot 的 get_group_msg_history 扫描群历史。"""
+        if not hasattr(event, "bot") or not hasattr(event.bot, "api"):
+            return []
+
+        max_rounds = int(self._get_setting("message.max_fetch_rounds", 50))
+        per_query_count = int(self._get_setting("message.per_query_count", 200))
+        max_count = int(self._get_setting("message.max_analysis_messages", 80))
+
+        texts = []
+        message_seq = 0
+        for _ in range(max_rounds):
+            try:
+                result = await event.bot.api.call_action(
+                    "get_group_msg_history",
+                    group_id=group_id,
+                    message_seq=message_seq,
+                    count=per_query_count,
+                    reverseOrder=True,
+                )
+            except Exception as e:
+                logger.debug(f"get_group_msg_history 调用失败: {e}")
+                return []
+
+            group_messages = result.get("messages", []) if isinstance(result, dict) else []
+            if not group_messages:
+                break
+
+            message_seq = group_messages[0].get("message_id", message_seq)
+            for item in group_messages:
+                sender = item.get("sender", {}) if isinstance(item, dict) else {}
+                if str(sender.get("user_id", "")) != str(user_id):
+                    continue
+                text = self._extract_plain_text_from_raw_message(item)
+                if text:
+                    texts.append(text)
+                    if len(texts) >= max_count:
+                        return texts
+
+        return texts
+
+    def _extract_plain_text_from_raw_message(self, item: Dict[str, Any]) -> str:
+        raw_message = item.get("message", "")
+        if isinstance(raw_message, str):
+            return raw_message.strip()
+        if not isinstance(raw_message, list):
+            return ""
+
+        parts = []
+        for seg in raw_message:
+            if not isinstance(seg, dict):
+                continue
+            if seg.get("type") != "text":
+                continue
+            data = seg.get("data", {})
+            text = data.get("text", "") if isinstance(data, dict) else ""
+            if text:
+                parts.append(str(text))
+        return "".join(parts).strip()
+
+    async def _resolve_group_member_id(self, event, group_id: int,
+                                       name: str) -> Optional[str]:
+        """在私聊中把 @昵称 文本尽力解析成群成员 QQ。"""
+        name = name.strip()
+        if not name or not hasattr(event, "bot") or not hasattr(event.bot, "api"):
+            return None
+
+        try:
+            result = await event.bot.api.call_action(
+                "get_group_member_list",
+                group_id=group_id,
+            )
+        except Exception as e:
+            logger.debug(f"get_group_member_list 调用失败: {e}")
+            return None
+
+        if isinstance(result, list):
+            members = result
+        elif isinstance(result, dict):
+            members = result.get("members", result.get("data", []))
+        else:
+            members = []
+        candidates = []
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            user_id = member.get("user_id")
+            names = [
+                str(member.get("card", "")).strip(),
+                str(member.get("nickname", "")).strip(),
+                str(member.get("remark", "")).strip(),
+            ]
+            if user_id and name in names:
+                return str(user_id)
+            if user_id and any(n and name.lower() in n.lower() for n in names):
+                candidates.append(str(user_id))
+
+        return candidates[0] if len(candidates) == 1 else None
 
     async def _search_history(self, query=None, user_id=None, group_id=None,
                               start=None, end=None, slice=":100"):
