@@ -276,26 +276,47 @@ class ClonePersonalityPlugin(Star):
             return False
         return any(target["qq"] == bot_id for target in self._extract_at_targets(event))
 
-    def _get_session_key(self, event: AstrMessageEvent) -> str:
-        return str(getattr(event, "unified_msg_origin", "") or "")
+    def _get_session_keys(self, event: AstrMessageEvent) -> List[str]:
+        keys = []
+        unified = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if unified:
+            keys.append(f"umo:{unified}")
+
+        group_id = self._get_event_group_id(event)
+        if group_id:
+            keys.append(f"group:{group_id}")
+        else:
+            try:
+                sender_id = event.get_sender_id()
+            except Exception:
+                sender_id = None
+            if sender_id:
+                keys.append(f"private:{sender_id}")
+
+        return list(dict.fromkeys(keys))
 
     def _get_session_active_persona(self, event: AstrMessageEvent) -> Optional[str]:
-        key = self._get_session_key(event)
-        if not key:
-            return None
-        return load_active_sessions().get(key)
+        sessions = load_active_sessions()
+        for key in self._get_session_keys(event):
+            persona_id = sessions.get(key)
+            if persona_id:
+                return persona_id
+        return None
 
     def _set_session_active_persona(self, event: AstrMessageEvent,
                                     persona_id: Optional[str]) -> None:
-        key = self._get_session_key(event)
-        if not key:
+        keys = self._get_session_keys(event)
+        if not keys:
+            logger.warning("无法生成会话 key，未保存会话人格")
             return
         sessions = load_active_sessions()
-        if persona_id:
-            sessions[key] = persona_id
-        else:
-            sessions.pop(key, None)
+        for key in keys:
+            if persona_id:
+                sessions[key] = persona_id
+            else:
+                sessions.pop(key, None)
         save_active_sessions(sessions)
+        logger.info(f"已保存会话人格: {keys} -> {persona_id or 'default'}")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_text_command(self, event: AstrMessageEvent):
@@ -308,6 +329,7 @@ class ClonePersonalityPlugin(Star):
             return
         if self._get_event_group_id(event) and not self._is_bot_mentioned(event):
             return
+        command_text = self._strip_bot_mentions(text)
 
         handlers = (
             ("克隆", self.clone_personality),
@@ -318,7 +340,7 @@ class ClonePersonalityPlugin(Star):
             ("人格删除", self.delete_personality),
         )
         for command_name, handler in handlers:
-            if text == command_name or text.startswith(f"{command_name} "):
+            if command_text == command_name or command_text.startswith(f"{command_name} "):
                 async for result in handler(event):
                     yield result
                 event.stop_event()
@@ -333,6 +355,7 @@ class ClonePersonalityPlugin(Star):
         persona_id = self._get_session_active_persona(event)
         if not persona_id:
             return
+        logger.info(f"主动人格会话命中: {self._get_session_keys(event)} -> {persona_id}")
 
         personalities = load_personalities()
         personality = personalities.get(persona_id)
@@ -472,7 +495,7 @@ class ClonePersonalityPlugin(Star):
         personalities = load_personalities()
 
         # ── 获取聊天记录 ──
-        yield event.plain_result(f"🫴 一把抓住 {target_name}(群 {group_id})，顷刻炼化...")
+        yield event.plain_result(f"🫳 一把抓住 {target_name}(群 {group_id})，顷刻炼化...")
 
         try:
             end_time = datetime.now()
@@ -628,7 +651,7 @@ class ClonePersonalityPlugin(Star):
     # ════════════════════════════════════════════════════
     @filter.command("人格切换")
     async def switch_personality(self, event: AstrMessageEvent):
-        text = event.message_str.strip()
+        text = self._strip_bot_mentions(event.message_str.strip())
         parts = text.split(maxsplit=1)
 
         if len(parts) < 2:
@@ -1200,6 +1223,7 @@ class ClonePersonalityPlugin(Star):
         persona_id = self._get_session_active_persona(event)
         if not persona_id:
             return
+        logger.info(f"LLM 请求人格会话命中: {self._get_session_keys(event)} -> {persona_id}")
 
         personalities = load_personalities()
         personality = personalities.get(persona_id)
