@@ -1244,7 +1244,7 @@ class ClonePersonalityPlugin(Star):
         prompt = (
             f"{persona_prompt}\n\n"
             f"用户消息：{text}\n\n"
-            f"请直接以该人格回复用户。不要说明你是AI，不要解释人格设定。"
+            f"直接回这一句。短一点，像群友聊天，不要说明你是AI，不要解释人格设定。"
         )
 
         resp = await self._call_llm(event, prompt)
@@ -1593,8 +1593,9 @@ class ClonePersonalityPlugin(Star):
 
     def _build_persona_text(self, personality: Dict, target_name: str) -> str:
         lines = [
-            f"你现在是 {target_name} 的人格克隆体。\n"
-            f"请以 {target_name} 的风格与用户交流。"
+            f"你现在就按 {target_name} 的群聊口吻说话。\n"
+            "像真人群友一样短句回复，别自我介绍，别解释设定，别科普腔。\n"
+            "能一句话说完就别展开；除非用户明确问技术细节，否则不要长篇分析。"
         ]
 
         summary = personality.get("summary", "")
