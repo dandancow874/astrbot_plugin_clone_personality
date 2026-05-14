@@ -2,7 +2,8 @@ name: clone_personality
 desc: "群友人格克隆插件 - 提取群友聊天记录，通过大模型克隆人格，可注入AstrBot人格系统"
 author: "AstrBot Plugin"
 version: "1.0.0"
-repo: "https://github.com/your-repo/astrbot_plugin_clone_personality"
+repo: "https://github.com/dandancow874/astrbot_plugin_clone_personality"
+branch: "main"
 attention:
   - "需要管理员在WebUI中添加admin用户ID到管理员列表才能使用`克隆`指令保存人格"
   - "使用前请确保群内有足够的聊天记录以供分析"
