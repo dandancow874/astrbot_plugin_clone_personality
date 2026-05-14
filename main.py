@@ -928,7 +928,8 @@ class ClonePersonalityPlugin(Star):
 2. 分析要具体、生动、有血有肉，像一份可直接放进机器人人格设定里的模板
 3. 不要泛泛而谈，要给出具体特征、触发条件、反应模式和边界
 4. “骚话/爆点语录/行为范例”必须尽量摘原始聊天里的原话，不要为了好看自行编造
-5. 如果原始聊天里没有足够爆点语录，可以少写，但不要伪造
+5. 骚话/爆点语录宁缺毋滥：只有明显有梗、有攻击性、有反差、有抽象感、有口癖或有传播感的句子才收录；普通陈述、无趣吐槽、泛泛观点不要硬凑
+6. 如果原始聊天里没有足够爆点语录，signature_quotes 返回空数组 []，不要为了凑数量填普通句子
 
 请按以下 JSON 格式输出（不要包含其他内容，只输出 JSON）：
 {{
@@ -955,7 +956,7 @@ class ClonePersonalityPlugin(Star):
         "当遇到某类话题/情境时：会如何反应"
     ],
     "common_phrases": ["常用口头禅或高频短语（最多10个）"],
-    "signature_quotes": ["从原始聊天记录中摘出的代表性原话、骚话或有爆点的话（5-10条，必须是原话，不要改写）"],
+    "signature_quotes": ["从原始聊天记录中摘出的真正有记忆点的原话（0-6条，必须是原话，不要改写；没有足够爆点就返回空数组，不要硬凑）"],
     "behavior_examples": [
         "当某情境出现时，你会说：引用或贴近原话的行为范例",
         "当某情境出现时，你会说：引用或贴近原话的行为范例",
@@ -1197,7 +1198,7 @@ class ClonePersonalityPlugin(Star):
                     if depth == 0:
                         json_str = text[start:i+1]
                         try:
-                            return json.loads(json_str)
+                            return self._normalize_personality(json.loads(json_str))
                         except json.JSONDecodeError:
                             logger.warning(f"JSON 解析失败")
 
@@ -1216,6 +1217,38 @@ class ClonePersonalityPlugin(Star):
             "reply_rules": [],
             "avoidances": [],
         }
+
+    def _normalize_personality(self, data: Dict) -> Dict:
+        data["signature_quotes"] = self._filter_signature_quotes(
+            data.get("signature_quotes", [])
+        )
+        return data
+
+    def _filter_signature_quotes(self, quotes: Any) -> List[str]:
+        if not isinstance(quotes, list):
+            return []
+
+        kept = []
+        seen = set()
+        signal_patterns = (
+            r"[？！!?]{1,}",
+            r"(哈哈|笑死|绷|破防|发癫|封口费|V我|草|艹|操|妈的|卧槽|离谱|重口味|国宴|IRS|猫娘|黑丝|病娇)",
+            r"(\d+\s*(块|元|万|k|K|w|W)|V\s*我\s*\d+)",
+        )
+        for raw in quotes:
+            quote = re.sub(r"\s+", " ", str(raw)).strip(" -“”\"'")
+            if len(quote) < 6 or len(quote) > 80:
+                continue
+            if quote in seen:
+                continue
+            if not any(re.search(pattern, quote, re.IGNORECASE) for pattern in signal_patterns):
+                continue
+            seen.add(quote)
+            kept.append(quote)
+            if len(kept) >= 6:
+                break
+
+        return kept
 
     def _extract_llm_text(self, resp) -> str:
         if resp is None:
