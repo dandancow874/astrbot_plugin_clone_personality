@@ -146,6 +146,22 @@ class ClonePersonalityPlugin(Star):
         except Exception:
             pass
 
+    def _extract_clone_target_arg(self, parts: List[str]) -> Optional[str]:
+        for part in parts[1:]:
+            if part in ("-f", "--force"):
+                continue
+            return part.strip()
+        return None
+
+    def _build_persona_id(self, target_name: str, target_uid: Any) -> str:
+        base = str(target_name or "").strip()
+        if not base or base.startswith("QQ"):
+            base = str(target_uid)
+        base = base.lstrip("@").strip()
+        # AstrBot persona_id 是唯一 ID，避免空格和路径类字符带来配置/命令歧义。
+        base = re.sub(r"[\\/:*?\"<>|\s]+", "_", base)
+        return base or str(target_uid)
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_plain_text_command(self, event: AstrMessageEvent):
         """
@@ -179,8 +195,8 @@ class ClonePersonalityPlugin(Star):
     async def clone_personality(self, event: AstrMessageEvent):
         """
         克隆群友人格。
-        群聊用法：克隆 @群友          或   克隆 @群友 -f
-        私聊用法：克隆 <群号> <群友QQ/@群友>  或   克隆 <群号> <群友QQ/@群友> -f
+        群聊用法：克隆 @群友 / 克隆 <群名片或昵称>
+        私聊用法：克隆 <群号> <群友QQ/@群友/群名片或昵称>
         """
         text = event.message_str.strip()
         parts = text.split()
@@ -190,22 +206,38 @@ class ClonePersonalityPlugin(Star):
         is_group = hasattr(event, 'group_id') and event.group_id
 
         if is_group:
-            # 群聊模式：从 @ 获取目标
+            # 群聊模式：从 @ 或昵称获取目标
             at_targets = [
                 comp for comp in event.message_obj.message
                 if isinstance(comp, At)
             ]
-            if not at_targets:
+            group_id = str(event.group_id)
+            target_arg = self._extract_clone_target_arg(parts)
+
+            if at_targets:
+                target_uid = at_targets[0].qq
+                target_name = at_targets[0].name or str(target_uid)
+            elif target_arg:
+                target_uid = await self._resolve_group_member_id(
+                    event,
+                    int(group_id),
+                    target_arg.lstrip("@"),
+                )
+                if not target_uid:
+                    yield event.plain_result(
+                        f"❌ 未在本群找到「{target_arg}」，请改用：克隆 @群友 或 克隆 <QQ号>"
+                    )
+                    return
+                target_name = target_arg.lstrip("@")
+            else:
                 yield event.plain_result(
-                    "群聊用法：克隆 @群友\n"
+                    "群聊用法：克隆 @群友 或 克隆 <群名片/昵称>\n"
                     "私聊用法：克隆 <群号> <群友QQ/@群友>"
                 )
                 return
 
-            target_uid = at_targets[0].qq
-            target_name = at_targets[0].name or str(target_uid)
-            group_id = str(event.group_id)
-            pid = f"{group_id}_{target_uid}"
+            pid = self._build_persona_id(target_name, target_uid)
+            persona_name = f"{group_id}{target_name}"
 
         else:
             # 私聊模式：克隆 <群号> <群友QQ/@群友>
@@ -247,11 +279,20 @@ class ClonePersonalityPlugin(Star):
                     return
                 target_name = target_uid_raw[1:] or f"QQ{target_uid}"
             else:
-                yield event.plain_result(f"❌ QQ号格式错误：{target_uid_raw}，应为纯数字")
-                return
+                target_uid = await self._resolve_group_member_id(
+                    event,
+                    int(group_id),
+                    target_uid_raw,
+                )
+                if target_uid:
+                    target_name = target_uid_raw
+                else:
+                    yield event.plain_result(f"❌ QQ号或群名片错误：{target_uid_raw}")
+                    return
 
             group_id = str(int(group_id))  # 标准化
-            pid = f"{group_id}_{target_uid}"
+            pid = self._build_persona_id(target_name, target_uid)
+            persona_name = f"{group_id}{target_name}"
 
         # ── 重复 ID 直接覆盖（不弹提示） ──
         personalities = load_personalities()
@@ -310,6 +351,7 @@ class ClonePersonalityPlugin(Star):
         # ── 保存人格（覆盖旧数据） ──
         personality["user_id"] = str(target_uid)
         personality["user_name"] = target_name
+        personality["persona_name"] = persona_name
         personality["group_id"] = str(group_id)
         personality["created_at"] = datetime.now().isoformat()
         personality["message_count"] = len(messages)
@@ -326,7 +368,8 @@ class ClonePersonalityPlugin(Star):
         summary = (
             f"🧬 人格克隆完成！\n"
             f"🆔 人格ID: {pid}\n"
-            f"👤 目标: {target_name}\n"
+            f"👤 名称: {persona_name}\n"
+            f"🎯 目标: {target_name}\n"
             f"📊 分析消息数: {len(messages)} 条\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"{personality.get('summary', '')}\n"
@@ -339,7 +382,7 @@ class ClonePersonalityPlugin(Star):
                 event, personality, target_name
             )
             if success:
-                summary += f"\n✅ 已自动将「{target_name}」人格注入 AstrBot 设定！"
+                summary += f"\n✅ 已自动创建/更新 AstrBot 人格，并切换当前会话到「{pid}」！"
             else:
                 summary += f"\n⚠️ 人格已保存，但注入 AstrBot 设定失败。"
         else:
@@ -465,7 +508,7 @@ class ClonePersonalityPlugin(Star):
         lines = ["📋 已克隆的人格列表：", "━━━━━━━━━━━━━━━━"]
         for pid, data in personalities.items():
             marker = " 👈 当前" if pid == active else ""
-            name = data.get("user_name", "未知")
+            name = data.get("persona_name", data.get("user_name", "未知"))
             msg_cnt = data.get("message_count", 0)
             created = data.get("created_at", "")[:10]
             gid = data.get("group_id", "")
@@ -502,7 +545,8 @@ class ClonePersonalityPlugin(Star):
             f"🧬 人格详情{is_active}",
             f"━━━━━━━━━━━━━━━━",
             f"🆔 ID: {pid}",
-            f"👤 目标: {data.get('user_name', '未知')}",
+            f"👤 名称: {data.get('persona_name', data.get('user_name', '未知'))}",
+            f"🎯 目标: {data.get('user_name', '未知')}",
             f"📊 分析消息数: {data.get('message_count', 0)} 条",
             f"📅 创建时间: {data.get('created_at', '未知')[:19]}",
             f"━━━━━━━━━━━━━━━━",
@@ -675,7 +719,11 @@ class ClonePersonalityPlugin(Star):
                                        name: str) -> Optional[str]:
         """在私聊中把 @昵称 文本尽力解析成群成员 QQ。"""
         name = name.strip()
-        if not name or not hasattr(event, "bot") or not hasattr(event.bot, "api"):
+        if not name:
+            return None
+        if name.isdigit():
+            return name
+        if not hasattr(event, "bot") or not hasattr(event.bot, "api"):
             return None
 
         try:
@@ -749,17 +797,19 @@ class ClonePersonalityPlugin(Star):
 
 请按以下 JSON 格式输出（不要包含其他内容，只输出 JSON）：
 {{
-    "summary": "一段生动的人格摘要（50-100字），描述此人的核心特点",
+    "summary": "一段生动的人格摘要（150-250字），描述此人的核心特点、价值取向、社交姿态和典型反应",
     "traits": {{
         "性格倾向": "如：外向开朗 / 内敛沉稳 / 毒舌幽默 / 温和友善 等",
         "情绪稳定性": "如：情绪稳定 / 容易激动 / 喜怒无常 等",
         "思维风格": "如：理性逻辑 / 感性发散 / 天马行空 / 务实接地气 等",
         "社交角色": "如：话题发起者 / 捧场王 / 冷场终结者 / 潜水窥屏 等"
     }},
-    "speaking_style": "描述其独特的说话风格（30-50字），包括语气、用词习惯、句式特点等",
-    "common_phrases": ["常用口头禅或高频短语（最多5个）"],
-    "interests": ["从聊天中推断的兴趣爱好或话题偏好（最多5个）"],
-    "emotional_pattern": "描述其情绪表达模式（20-40字），比如是否爱用表情包、语气词等"
+    "speaking_style": "描述其独特的说话风格（80-150字），包括语气、用词习惯、句式特点、吐槽方式、反问方式等",
+    "common_phrases": ["常用口头禅或高频短语（最多8个）"],
+    "interests": ["从聊天中推断的兴趣爱好或话题偏好（最多8个）"],
+    "emotional_pattern": "描述其情绪表达模式（60-120字），比如是否爱用表情包、语气词、脏话、阴阳怪气、冷处理等",
+    "reply_rules": ["模仿该人格回复时应遵守的具体规则（5-8条）"],
+    "avoidances": ["不符合该人格的表达方式或话题处理方式（3-5条）"]
 }}
 
 以下是 "{target_name}" 的聊天记录：
@@ -805,6 +855,20 @@ class ClonePersonalityPlugin(Star):
         """优先使用 WebUI 指定 provider，缺失时回退当前会话/默认 LLM。"""
         provider_id = str(self._get_setting("llm.provider_id", "") or "").strip()
 
+        if hasattr(self.context, "llm_generate"):
+            chat_provider_id = provider_id or None
+            if not chat_provider_id and hasattr(self.context, "get_current_chat_provider_id"):
+                try:
+                    chat_provider_id = await self.context.get_current_chat_provider_id(
+                        event.unified_msg_origin
+                    )
+                except Exception:
+                    chat_provider_id = None
+            return await self.context.llm_generate(
+                chat_provider_id=chat_provider_id,
+                prompt=prompt,
+            )
+
         provider = None
         if provider_id and hasattr(self.context, "get_provider_by_id"):
             provider = self.context.get_provider_by_id(provider_id)
@@ -834,7 +898,7 @@ class ClonePersonalityPlugin(Star):
 
     def _parse_llm_response(self, resp) -> Optional[Dict]:
         """解析 LLM 返回的 JSON 人格数据"""
-        text = str(resp)
+        text = self._extract_llm_text(resp)
 
         start = text.find('{')
         if start != -1:
@@ -857,8 +921,38 @@ class ClonePersonalityPlugin(Star):
             "speaking_style": "",
             "common_phrases": [],
             "interests": [],
-            "emotional_pattern": ""
+            "emotional_pattern": "",
+            "reply_rules": [],
+            "avoidances": [],
         }
+
+    def _extract_llm_text(self, resp) -> str:
+        if resp is None:
+            return ""
+
+        for attr in ("completion_text", "text", "content"):
+            value = getattr(resp, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        result_chain = getattr(resp, "result_chain", None)
+        chain = getattr(result_chain, "chain", None)
+        if isinstance(chain, list):
+            texts = []
+            for comp in chain:
+                value = getattr(comp, "text", None)
+                if value:
+                    texts.append(str(value))
+            if texts:
+                return "".join(texts).strip()
+
+        if isinstance(resp, dict):
+            for key in ("completion_text", "text", "content", "result"):
+                value = resp.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        return str(resp).strip()
 
     async def _inject_to_astrbot_persona(self, event, personality: Dict,
                                           target_name: str) -> bool:
@@ -866,46 +960,95 @@ class ClonePersonalityPlugin(Star):
         try:
             persona_text = self._build_persona_text(personality, target_name)
 
-            # 方法1: 通过配置 API
-            if hasattr(self, 'config') and hasattr(self.config, 'set'):
-                await self.config.set("persona", persona_text)
-                await self.config.save()
-                logger.info(f"已通过 config API 注入人格: {target_name}")
-                return True
+            persona_id = self._build_persona_id(
+                personality.get("user_name", target_name),
+                personality.get("user_id", target_name),
+            )
 
-            # 方法2: 写入配置文件
-            config_paths = [
-                "/AstrBot/data/config.json",
-                "/AstrBot/astrbot/config.json",
-                "data/config.json",
-            ]
-            for cp in config_paths:
-                if os.path.exists(cp):
+            # 方法1: AstrBot v4 PersonaManager + ConversationManager
+            if hasattr(self.context, "persona_manager"):
+                persona_mgr = self.context.persona_manager
+                try:
+                    existing = None
                     try:
-                        with open(cp, "r", encoding="utf-8") as f:
-                            config = json.load(f)
-                        config["persona"] = persona_text
-                        with open(cp, "w", encoding="utf-8") as f:
-                            json.dump(config, f, ensure_ascii=False, indent=2)
-                        logger.info(f"已写入配置文件: {cp}")
-                        return True
-                    except Exception as e:
-                        logger.debug(f"写入 {cp} 失败: {e}")
+                        existing = await self._maybe_await(
+                            persona_mgr.get_persona(persona_id)
+                        )
+                    except Exception:
+                        existing = None
 
-            # 方法3: 本地保存
+                    if existing:
+                        await self._maybe_await(
+                            persona_mgr.update_persona(
+                                persona_id=persona_id,
+                                system_prompt=persona_text,
+                                begin_dialogs=[],
+                                tools=None,
+                            )
+                        )
+                    else:
+                        await self._maybe_await(
+                            persona_mgr.create_persona(
+                                persona_id=persona_id,
+                                system_prompt=persona_text,
+                                begin_dialogs=[],
+                                tools=None,
+                            )
+                        )
+
+                    await self._switch_current_conversation_persona(
+                        event,
+                        persona_id,
+                    )
+                    logger.info(f"已创建/更新并切换 AstrBot 人格: {persona_id}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"通过 PersonaManager 注入失败: {e}")
+
+            # PersonaManager 不可用或失败时只保存本地文件，不声称已注入 AstrBot。
             persona_file = os.path.join(PLUGIN_DIR, "current_persona.txt")
             with open(persona_file, "w", encoding="utf-8") as f:
                 f.write(persona_text)
             logger.info(f"人格已保存到 {persona_file}")
-            return True
+            return False
 
         except Exception as e:
             logger.error(f"注入人格失败: {e}")
             return False
 
+    async def _maybe_await(self, value):
+        if hasattr(value, "__await__"):
+            return await value
+        return value
+
+    async def _switch_current_conversation_persona(self, event,
+                                                   persona_id: str) -> None:
+        if not hasattr(self.context, "conversation_manager"):
+            return
+
+        conv_mgr = self.context.conversation_manager
+        umo = event.unified_msg_origin
+        curr_cid = await self._maybe_await(conv_mgr.get_curr_conversation_id(umo))
+        if not curr_cid:
+            await self._maybe_await(
+                conv_mgr.new_conversation(
+                    unified_msg_origin=umo,
+                    persona_id=persona_id,
+                )
+            )
+            return
+
+        await self._maybe_await(
+            conv_mgr.update_conversation(
+                unified_msg_origin=umo,
+                conversation_id=curr_cid,
+                persona_id=persona_id,
+            )
+        )
+
     def _build_persona_text(self, personality: Dict, target_name: str) -> str:
         lines = [
-            f"你现在是 {target_name} 的人格克隆体。"
+            f"你现在是 {target_name} 的人格克隆体。\n"
             f"请以 {target_name} 的风格与用户交流。"
         ]
 
@@ -927,11 +1070,29 @@ class ClonePersonalityPlugin(Star):
         if phrases:
             lines.append(f"\n【常用表达】\n{' '.join(phrases)}")
 
+        interests = personality.get("interests", [])
+        if interests:
+            lines.append("\n【关注话题】")
+            for item in interests:
+                lines.append(f"- {item}")
+
         pattern = personality.get("emotional_pattern", "")
         if pattern:
             lines.append(f"\n【情绪模式】\n{pattern}")
 
-        lines.append("\n请完全代入该角色，在所有回复中保持一致的风格和口吻。")
+        rules = personality.get("reply_rules", [])
+        if rules:
+            lines.append("\n【回复规则】")
+            for item in rules:
+                lines.append(f"- {item}")
+
+        avoidances = personality.get("avoidances", [])
+        if avoidances:
+            lines.append("\n【避免事项】")
+            for item in avoidances:
+                lines.append(f"- {item}")
+
+        lines.append("\n请在所有回复中保持该角色的稳定风格、措辞习惯和情绪节奏。")
 
         return "\n".join(lines)
 
