@@ -83,6 +83,25 @@ AstrBot 群友人格克隆插件。插件会读取目标群友的群聊历史，
 | `message.max_message_chars` | 单条消息最大字符数 |
 | `message.max_prompt_chars` | 送入模型的聊天记录总字符预算 |
 | `admin_only_inject` | 打开后仅管理员克隆时会创建/更新 AstrBot 人格 |
+| `auto_update.frequency_days` | 人格自动更新频率，单位为天；`0` 表示关闭 |
+| `auto_update.check_interval_minutes` | 后台检查是否有人格到期的间隔 |
+
+## 定期更新
+
+在 WebUI 中把 `auto_update.frequency_days` 设置为大于 0 后，插件会定期检查已保存人格。
+
+到期后会：
+
+- 按人格保存的 `group_id` 和 `user_id` 重新抓取该群里的目标发言。
+- 重新分析并覆盖 `personalities.json` 中的人格数据。
+- 尝试同步更新 AstrBot 人格系统里的同名人格。
+- 更新完后在对应群发一句提醒，例如：
+
+```text
+🧪 cbaba、creep 已定期蒸馏完毕，味儿续上了。
+```
+
+注意：后台更新需要插件运行期间至少收到过一次消息，才能拿到可用的 OneBot API 上下文。
 
 ## 上下文控制
 

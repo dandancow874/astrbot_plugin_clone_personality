@@ -10,6 +10,7 @@
 import json
 import os
 import re
+import asyncio
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 
@@ -42,6 +43,10 @@ DEFAULT_CONFIG = {
         "max_analysis_messages": 80,
         "max_message_chars": 180,
         "max_prompt_chars": 12000,
+    },
+    "auto_update": {
+        "frequency_days": 0,
+        "check_interval_minutes": 60,
     },
 }
 
@@ -127,9 +132,24 @@ class ClonePersonalityPlugin(Star):
     def __init__(self, context: Context, config: Optional[Any] = None) -> None:
         super().__init__(context)
         self.plugin_cfg = config
+        self._auto_update_task = None
+        self._last_event = None
 
     async def initialize(self):
         logger.info("群友人格克隆插件 v2.0 已加载")
+        self._auto_update_task = asyncio.create_task(self._auto_update_loop())
+
+    async def terminate(self):
+        if self._auto_update_task:
+            self._auto_update_task.cancel()
+            try:
+                await self._auto_update_task
+            except asyncio.CancelledError:
+                pass
+
+    def _remember_event(self, event: AstrMessageEvent) -> None:
+        if hasattr(event, "bot") and hasattr(event.bot, "api"):
+            self._last_event = event
 
     def _get_setting(self, path: str, default: Any = None) -> Any:
         """读取 WebUI 插件配置，缺失时回退到本地 config.json/default。"""
@@ -162,6 +182,144 @@ class ClonePersonalityPlugin(Star):
                 self.plugin_cfg.set(key, value)
         except Exception:
             pass
+
+    async def _auto_update_loop(self):
+        while True:
+            try:
+                interval = int(self._get_setting(
+                    "auto_update.check_interval_minutes",
+                    60,
+                ))
+                await asyncio.sleep(max(interval, 5) * 60)
+                await self._auto_update_due_personalities()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"定期更新人格失败: {e}")
+
+    async def _auto_update_due_personalities(self) -> None:
+        frequency_days = int(self._get_setting("auto_update.frequency_days", 0))
+        if frequency_days <= 0:
+            return
+        if not self._last_event:
+            logger.debug("定期更新跳过：还没有可用的 bot 事件上下文")
+            return
+
+        personalities = load_personalities()
+        if not personalities:
+            return
+
+        now = datetime.now()
+        due_items = []
+        for pid, data in personalities.items():
+            group_id = str(data.get("group_id", "")).strip()
+            user_id = str(data.get("user_id", "")).strip()
+            if not group_id or not user_id:
+                continue
+
+            last_text = (
+                data.get("last_auto_update_at")
+                or data.get("updated_at")
+                or data.get("created_at")
+                or ""
+            )
+            try:
+                last_at = datetime.fromisoformat(str(last_text))
+            except Exception:
+                last_at = datetime.min
+
+            if now - last_at >= timedelta(days=frequency_days):
+                due_items.append((pid, data))
+
+        if not due_items:
+            return
+
+        logger.info(f"开始定期更新 {len(due_items)} 个已保存人格")
+        updated_by_group: Dict[str, List[str]] = {}
+        for pid, data in due_items:
+            updated = await self._refresh_personality(pid, data)
+            if not updated:
+                continue
+            personalities[pid] = updated
+            group_id = str(updated.get("group_id", ""))
+            name = updated.get("user_name", pid)
+            updated_by_group.setdefault(group_id, []).append(str(name))
+
+        if updated_by_group:
+            save_personalities(personalities)
+            for group_id, names in updated_by_group.items():
+                await self._send_auto_update_notice(group_id, names)
+
+    async def _refresh_personality(self, pid: str, data: Dict) -> Optional[Dict]:
+        try:
+            group_id = int(data.get("group_id"))
+            user_id = int(data.get("user_id"))
+            target_name = data.get("user_name", pid)
+
+            end_time = datetime.now()
+            initial_days = int(self._get_setting("message.initial_days", 30))
+            history_slice = str(self._get_setting("message.history_slice", ":100"))
+
+            messages = await self._fetch_user_messages(
+                event=self._last_event,
+                user_id=user_id,
+                group_id=group_id,
+                target_name=target_name,
+                start=(end_time - timedelta(days=initial_days)).strftime("%Y-%m-%d"),
+                end=end_time.strftime("%Y-%m-%d %H:%M"),
+                slice=history_slice,
+            )
+            if isinstance(messages, dict):
+                messages = messages.get("messages", [])
+            if not messages:
+                return None
+
+            personality = await self._analyze_personality(
+                self._last_event,
+                messages,
+                target_name,
+            )
+            if not personality:
+                return None
+
+            personality["user_id"] = str(user_id)
+            personality["user_name"] = target_name
+            personality["persona_name"] = data.get("persona_name", f"{group_id}{target_name}")
+            personality["group_id"] = str(group_id)
+            personality["created_at"] = data.get("created_at", datetime.now().isoformat())
+            personality["updated_at"] = datetime.now().isoformat()
+            personality["last_auto_update_at"] = datetime.now().isoformat()
+            personality["message_count"] = len(messages)
+
+            personalities = load_personalities()
+            personalities[pid] = personality
+            save_personalities(personalities)
+
+            await self._inject_to_astrbot_persona(self._last_event, personality, target_name)
+            return personality
+        except Exception as e:
+            logger.warning(f"定期更新人格 {pid} 失败: {e}")
+            return None
+
+    async def _send_auto_update_notice(self, group_id: str,
+                                       names: List[str]) -> None:
+        if not self._last_event or not hasattr(self._last_event, "bot"):
+            return
+        if not hasattr(self._last_event.bot, "api"):
+            return
+
+        display = "、".join(names[:5])
+        if len(names) > 5:
+            display += f" 等 {len(names)} 个"
+        text = f"🧪 {display} 已定期蒸馏完毕，味儿续上了。"
+        try:
+            await self._last_event.bot.api.call_action(
+                "send_group_msg",
+                group_id=int(group_id),
+                message=text,
+            )
+        except Exception as e:
+            logger.warning(f"发送定期更新提醒失败: {e}")
 
     def _extract_clone_target_arg(self, parts: List[str],
                                   skip_values: Optional[List[str]] = None
@@ -324,6 +482,7 @@ class ClonePersonalityPlugin(Star):
         兼容不带 AstrBot 唤醒前缀的中文指令。
         例如：克隆 477065120 2054716346
         """
+        self._remember_event(event)
         text = event.message_str.strip()
         if not text or text.startswith("/"):
             return
@@ -352,6 +511,7 @@ class ClonePersonalityPlugin(Star):
     @filter.on_llm_request(priority=10)
     async def apply_active_persona_to_llm(self, event: AstrMessageEvent,
                                           req: ProviderRequest):
+        self._remember_event(event)
         persona_id = self._get_session_active_persona(event)
         if not persona_id:
             return
@@ -383,6 +543,7 @@ class ClonePersonalityPlugin(Star):
         群聊用法：克隆 @群友 / 克隆 <群名片或昵称>
         私聊用法：克隆 <群号> <群友QQ/@群友/群名片或昵称>
         """
+        self._remember_event(event)
         text = event.message_str.strip()
         parts = text.split()
         force_refresh = "-f" in parts or "--force" in parts

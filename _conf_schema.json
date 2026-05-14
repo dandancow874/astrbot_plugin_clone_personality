@@ -102,5 +102,33 @@
     "type": "bool",
     "hint": "打开后只有管理员克隆时会自动注入设定；关闭后所有人克隆都会自动注入。人格数据始终会保存，重复 ID 直接覆盖。",
     "default": true
+  },
+  "auto_update": {
+    "description": "定期更新",
+    "type": "object",
+    "items": {
+      "frequency_days": {
+        "description": "人格自动更新频率（日）",
+        "hint": "0 表示关闭。开启后，到期的人格会重新抓取聊天记录并覆盖更新，更新完成后在对应群发送一句提醒。",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
+        "default": 0
+      },
+      "check_interval_minutes": {
+        "description": "后台检查间隔（分钟）",
+        "hint": "插件按这个间隔检查是否有人格到期；不是每次都更新。",
+        "type": "int",
+        "slider": {
+          "min": 10,
+          "max": 1440,
+          "step": 10
+        },
+        "default": 60
+      }
+    }
   }
 }
