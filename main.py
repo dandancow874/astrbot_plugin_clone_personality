@@ -434,16 +434,12 @@ class ClonePersonalityPlugin(Star):
 
         can_inject = (not admin_only) or (admin_only and is_admin)
 
-        summary = (
-            f"🧬 人格克隆完成！\n"
-            f"🆔 人格ID: {pid}\n"
-            f"👤 名称: {persona_name}\n"
-            f"🎯 目标: {target_name}\n"
-            f"📊 分析消息数: {len(messages)} 条\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"{personality.get('summary', '')}\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"💡 使用「人格切换 {pid}」切换为此人格"
+        summary = self._build_persona_result_message(
+            pid=pid,
+            persona_name=persona_name,
+            target_name=target_name,
+            message_count=len(messages),
+            personality=personality,
         )
 
         if can_inject:
@@ -451,14 +447,11 @@ class ClonePersonalityPlugin(Star):
                 event, personality, target_name
             )
             if success:
-                summary += f"\n✅ 已自动创建/更新 AstrBot 人格，并切换当前会话到「{pid}」！"
+                summary += f"\n\n[系统] 已创建/更新 AstrBot 人格：{pid}"
             else:
-                summary += f"\n⚠️ 人格已保存，但注入 AstrBot 设定失败。"
+                summary += f"\n\n[系统] 人格已保存，但创建/更新 AstrBot 人格失败。"
         else:
-            summary += (
-                f"\nℹ️ 当前为「仅管理员注入」模式。\n"
-                f"   管理员可使用「管理员注入开关」关闭此限制。"
-            )
+            summary += f"\n\n[系统] 人格已保存，当前设置为仅管理员可创建/更新 AstrBot 人格。"
 
         yield event.plain_result(summary)
 
@@ -991,6 +984,56 @@ class ClonePersonalityPlugin(Star):
             return await event.llm.text_chat(prompt)
         return None
 
+    def _build_persona_result_message(self, pid: str, persona_name: str,
+                                      target_name: str, message_count: int,
+                                      personality: Dict) -> str:
+        """用合并聊天记录风格输出人格描述，避免插件操作提示打断阅读。"""
+        lines = [
+            f"{persona_name}",
+            f"人格ID：{pid}",
+            f"目标：{target_name}",
+            f"分析消息数：{message_count} 条",
+            "",
+            "人格摘要",
+            str(personality.get("summary", "")).strip() or "无",
+        ]
+
+        traits = personality.get("traits", {})
+        if traits:
+            lines.extend(["", "性格特征"])
+            for key, value in traits.items():
+                lines.append(f"{key}：{value}")
+
+        style = str(personality.get("speaking_style", "")).strip()
+        if style:
+            lines.extend(["", "说话风格", style])
+
+        phrases = personality.get("common_phrases", [])
+        if phrases:
+            lines.extend(["", "常用表达"])
+            lines.extend([f"- {phrase}" for phrase in phrases])
+
+        interests = personality.get("interests", [])
+        if interests:
+            lines.extend(["", "关注话题"])
+            lines.extend([f"- {item}" for item in interests])
+
+        pattern = str(personality.get("emotional_pattern", "")).strip()
+        if pattern:
+            lines.extend(["", "情绪模式", pattern])
+
+        rules = personality.get("reply_rules", [])
+        if rules:
+            lines.extend(["", "回复规则"])
+            lines.extend([f"- {item}" for item in rules])
+
+        avoidances = personality.get("avoidances", [])
+        if avoidances:
+            lines.extend(["", "避免事项"])
+            lines.extend([f"- {item}" for item in avoidances])
+
+        return "\n".join(lines)
+
     def _parse_llm_response(self, resp) -> Optional[Dict]:
         """解析 LLM 返回的 JSON 人格数据"""
         text = self._extract_llm_text(resp)
@@ -1060,7 +1103,7 @@ class ClonePersonalityPlugin(Star):
                 personality.get("user_id", target_name),
             )
 
-            # 方法1: AstrBot v4 PersonaManager + ConversationManager
+            # 方法1: AstrBot v4 PersonaManager。只创建/更新，不自动切换会话人格。
             if hasattr(self.context, "persona_manager"):
                 persona_mgr = self.context.persona_manager
                 try:
@@ -1091,11 +1134,7 @@ class ClonePersonalityPlugin(Star):
                             )
                         )
 
-                    await self._switch_current_conversation_persona(
-                        event,
-                        persona_id,
-                    )
-                    logger.info(f"已创建/更新并切换 AstrBot 人格: {persona_id}")
+                    logger.info(f"已创建/更新 AstrBot 人格: {persona_id}")
                     return True
                 except Exception as e:
                     logger.warning(f"通过 PersonaManager 注入失败: {e}")
@@ -1115,31 +1154,6 @@ class ClonePersonalityPlugin(Star):
         if hasattr(value, "__await__"):
             return await value
         return value
-
-    async def _switch_current_conversation_persona(self, event,
-                                                   persona_id: str) -> None:
-        if not hasattr(self.context, "conversation_manager"):
-            return
-
-        conv_mgr = self.context.conversation_manager
-        umo = event.unified_msg_origin
-        curr_cid = await self._maybe_await(conv_mgr.get_curr_conversation_id(umo))
-        if not curr_cid:
-            await self._maybe_await(
-                conv_mgr.new_conversation(
-                    unified_msg_origin=umo,
-                    persona_id=persona_id,
-                )
-            )
-            return
-
-        await self._maybe_await(
-            conv_mgr.update_conversation(
-                unified_msg_origin=umo,
-                conversation_id=curr_cid,
-                persona_id=persona_id,
-            )
-        )
 
     def _build_persona_text(self, personality: Dict, target_name: str) -> str:
         lines = [
