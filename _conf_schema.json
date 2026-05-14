@@ -1,0 +1,85 @@
+{
+  "llm": {
+    "description": "LLM 配置",
+    "type": "object",
+    "items": {
+      "provider_id": {
+        "description": "用于分析人格的 LLM 提供商",
+        "hint": "留空时使用当前正在使用的 LLM 提供商",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider"
+      }
+    }
+  },
+  "message": {
+    "description": "聊天记录与上下文配置",
+    "type": "object",
+    "items": {
+      "initial_days": {
+        "description": "优先查询最近多少天",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 90,
+          "step": 1
+        },
+        "default": 30
+      },
+      "fallback_days": {
+        "description": "首次无记录时扩大查询到最近多少天",
+        "type": "int",
+        "slider": {
+          "min": 30,
+          "max": 365,
+          "step": 5
+        },
+        "default": 90
+      },
+      "history_slice": {
+        "description": "聊天记录工具 slice 参数",
+        "hint": "例如 :100 表示最多取 100 条，具体含义取决于 search_qq_chat_history 工具",
+        "type": "string",
+        "default": ":100"
+      },
+      "max_analysis_messages": {
+        "description": "用于分析的最大消息条数",
+        "hint": "越大越准，但更消耗上下文和 Token",
+        "type": "int",
+        "slider": {
+          "min": 20,
+          "max": 500,
+          "step": 10
+        },
+        "default": 80
+      },
+      "max_message_chars": {
+        "description": "单条消息最大字符数",
+        "type": "int",
+        "slider": {
+          "min": 50,
+          "max": 500,
+          "step": 10
+        },
+        "default": 180
+      },
+      "max_prompt_chars": {
+        "description": "聊天记录部分最大字符数",
+        "hint": "用于控制送入模型的聊天记录总长度，避免超过上下文",
+        "type": "int",
+        "slider": {
+          "min": 2000,
+          "max": 50000,
+          "step": 1000
+        },
+        "default": 12000
+      }
+    }
+  },
+  "admin_only_inject": {
+    "description": "仅管理员可注入设定",
+    "type": "bool",
+    "hint": "打开后只有管理员克隆时会自动注入设定；关闭后所有人克隆都会自动注入。人格数据始终会保存，重复 ID 直接覆盖。",
+    "default": true
+  }
+}

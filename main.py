@@ -28,6 +28,17 @@ CONFIG_FILE = os.path.join(PLUGIN_DIR, "config.json")
 # ─── 配置管理 ────────────────────────────────────────────
 DEFAULT_CONFIG = {
     "admin_only_inject": True,   # True=仅管理员可注入设定, False=所有人可注入
+    "llm": {
+        "provider_id": "",
+    },
+    "message": {
+        "initial_days": 30,
+        "fallback_days": 90,
+        "history_slice": ":100",
+        "max_analysis_messages": 80,
+        "max_message_chars": 180,
+        "max_prompt_chars": 12000,
+    },
 }
 
 
@@ -94,11 +105,69 @@ def set_active_persona(persona_id: Optional[str]):
 )
 class ClonePersonalityPlugin(Star):
 
-    def __init__(self, context: Context) -> None:
+    def __init__(self, context: Context, config: Optional[Any] = None) -> None:
         super().__init__(context)
+        self.plugin_cfg = config
 
     async def initialize(self):
         logger.info("群友人格克隆插件 v2.0 已加载")
+
+    def _get_setting(self, path: str, default: Any = None) -> Any:
+        """读取 WebUI 插件配置，缺失时回退到本地 config.json/default。"""
+        config_sources = [self.plugin_cfg, load_config(), DEFAULT_CONFIG]
+        keys = path.split(".")
+        for source in config_sources:
+            current = source
+            try:
+                for key in keys:
+                    if isinstance(current, dict):
+                        current = current[key]
+                    elif hasattr(current, "get"):
+                        current = current.get(key)
+                    else:
+                        current = getattr(current, key)
+                if current is not None:
+                    return current
+            except Exception:
+                continue
+        return default
+
+    def _set_runtime_setting(self, key: str, value: Any) -> None:
+        """尽量同步运行时插件配置；持久化仍交给 WebUI 或本地 config.json。"""
+        try:
+            if isinstance(self.plugin_cfg, dict):
+                self.plugin_cfg[key] = value
+            elif hasattr(self.plugin_cfg, "__setitem__"):
+                self.plugin_cfg[key] = value
+            elif hasattr(self.plugin_cfg, "set"):
+                self.plugin_cfg.set(key, value)
+        except Exception:
+            pass
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_plain_text_command(self, event: AstrMessageEvent):
+        """
+        兼容不带 AstrBot 唤醒前缀的中文指令。
+        例如：克隆 477065120 2054716346
+        """
+        text = event.message_str.strip()
+        if not text or text.startswith("/"):
+            return
+
+        handlers = (
+            ("克隆", self.clone_personality),
+            ("管理员注入开关", self.toggle_admin_inject),
+            ("人格切换", self.switch_personality),
+            ("人格列表", self.list_personalities),
+            ("人格详情", self.personality_detail),
+            ("人格删除", self.delete_personality),
+        )
+        for command_name, handler in handlers:
+            if text == command_name or text.startswith(f"{command_name} "):
+                async for result in handler(event):
+                    yield result
+                event.stop_event()
+                return
 
     # ════════════════════════════════════════════════════
     # 1. 克隆指令
@@ -178,22 +247,28 @@ class ClonePersonalityPlugin(Star):
 
         try:
             end_time = datetime.now()
-            start_time = end_time - timedelta(days=30)
+            initial_days = int(self._get_setting("message.initial_days", 30))
+            fallback_days = int(self._get_setting("message.fallback_days", 90))
+            history_slice = str(self._get_setting("message.history_slice", ":100"))
+
+            start_time = end_time - timedelta(days=initial_days)
 
             messages = await self._fetch_user_messages(
                 user_id=int(target_uid),
                 group_id=int(group_id),
                 start=start_time.strftime("%Y-%m-%d"),
-                end=end_time.strftime("%Y-%m-%d %H:%M")
+                end=end_time.strftime("%Y-%m-%d %H:%M"),
+                slice=history_slice,
             )
 
             if not messages:
-                start_time = end_time - timedelta(days=90)
+                start_time = end_time - timedelta(days=fallback_days)
                 messages = await self._fetch_user_messages(
                     user_id=int(target_uid),
                     group_id=int(group_id),
                     start=start_time.strftime("%Y-%m-%d"),
-                    end=end_time.strftime("%Y-%m-%d %H:%M")
+                    end=end_time.strftime("%Y-%m-%d %H:%M"),
+                    slice=history_slice,
                 )
 
             if not messages:
@@ -227,8 +302,7 @@ class ClonePersonalityPlugin(Star):
         save_personalities(personalities)
 
         # ── 判断是否注入设定 ──
-        plugin_config = load_config()
-        admin_only = plugin_config.get("admin_only_inject", True)
+        admin_only = bool(self._get_setting("admin_only_inject", True))
         is_admin = await self._is_admin(event)
 
         can_inject = (not admin_only) or (admin_only and is_admin)
@@ -281,7 +355,7 @@ class ClonePersonalityPlugin(Star):
         arg = parts[1].strip().lower() if len(parts) > 1 else "toggle"
 
         config = load_config()
-        current = config.get("admin_only_inject", True)
+        current = bool(self._get_setting("admin_only_inject", True))
 
         if arg in ("on", "开启", "true", "1"):
             config["admin_only_inject"] = True
@@ -293,6 +367,7 @@ class ClonePersonalityPlugin(Star):
             config["admin_only_inject"] = not current
             new_status = "ON" if config["admin_only_inject"] else "OFF"
 
+        self._set_runtime_setting("admin_only_inject", config["admin_only_inject"])
         save_config(config)
 
         if config["admin_only_inject"]:
@@ -477,7 +552,8 @@ class ClonePersonalityPlugin(Star):
     # ════════════════════════════════════════════════════
 
     async def _fetch_user_messages(self, user_id: int, group_id: int,
-                                   start: str, end: str) -> List[str]:
+                                   start: str, end: str,
+                                   slice: str = ":100") -> List[str]:
         """获取指定用户的聊天记录"""
         messages = []
 
@@ -488,7 +564,7 @@ class ClonePersonalityPlugin(Star):
                 group_id=group_id,
                 start=start,
                 end=end,
-                slice=":100"
+                slice=slice
             )
 
             if result and isinstance(result, list):
@@ -537,7 +613,7 @@ class ClonePersonalityPlugin(Star):
     async def _analyze_personality(self, event, messages: List[str],
                                    target_name: str) -> Optional[Dict]:
         """调用大模型分析人格特征"""
-        sample = messages[:80]
+        sample = self._prepare_analysis_messages(messages)
         chat_text = "\n".join([f"- {m}" for m in sample])
 
         prompt = f"""你是一位人格分析专家。请分析以下 "{target_name}" 的聊天记录，提取其人格特征。
@@ -567,21 +643,9 @@ class ClonePersonalityPlugin(Star):
 """
 
         try:
-            if hasattr(self, 'llm') and self.llm:
-                resp = await self.llm.text_chat(prompt)
-                if resp:
-                    return self._parse_llm_response(resp)
-            elif hasattr(event, 'broadcast') and hasattr(event.broadcast, 'llm'):
-                resp = await event.broadcast.llm.text_chat(prompt)
-                if resp:
-                    return self._parse_llm_response(resp)
-            else:
-                try:
-                    resp = await event.llm.text_chat(prompt)
-                    if resp:
-                        return self._parse_llm_response(resp)
-                except Exception:
-                    pass
+            resp = await self._call_llm(event, prompt)
+            if resp:
+                return self._parse_llm_response(resp)
 
             logger.error("无法访问大模型接口")
             return None
@@ -589,6 +653,60 @@ class ClonePersonalityPlugin(Star):
         except Exception as e:
             logger.error(f"调用大模型分析人格失败: {e}")
             return None
+
+    def _prepare_analysis_messages(self, messages: List[str]) -> List[str]:
+        """按配置压缩聊天记录，避免超过模型上下文。"""
+        max_count = int(self._get_setting("message.max_analysis_messages", 80))
+        max_msg_chars = int(self._get_setting("message.max_message_chars", 180))
+        max_prompt_chars = int(self._get_setting("message.max_prompt_chars", 12000))
+
+        prepared = []
+        used_chars = 0
+        for raw in messages[:max_count]:
+            msg = re.sub(r"\s+", " ", str(raw)).strip()
+            if not msg:
+                continue
+            msg = re.sub(r"https?://\S+", "[链接]", msg)
+            if len(msg) > max_msg_chars:
+                msg = msg[:max_msg_chars] + "..."
+            projected = used_chars + len(msg) + 3
+            if projected > max_prompt_chars:
+                break
+            prepared.append(msg)
+            used_chars = projected
+
+        return prepared
+
+    async def _call_llm(self, event, prompt: str):
+        """优先使用 WebUI 指定 provider，缺失时回退当前会话/默认 LLM。"""
+        provider_id = str(self._get_setting("llm.provider_id", "") or "").strip()
+
+        provider = None
+        if provider_id and hasattr(self.context, "get_provider_by_id"):
+            provider = self.context.get_provider_by_id(provider_id)
+        if provider is None and hasattr(self.context, "get_using_provider"):
+            provider = self.context.get_using_provider()
+
+        if provider and hasattr(provider, "text_chat"):
+            try:
+                return await provider.text_chat(
+                    prompt=prompt,
+                    session_id=None,
+                    contexts=[],
+                    image_urls=[],
+                    func_tool=None,
+                    system_prompt="",
+                )
+            except TypeError:
+                return await provider.text_chat(prompt)
+
+        if hasattr(self, 'llm') and self.llm:
+            return await self.llm.text_chat(prompt)
+        if hasattr(event, 'broadcast') and hasattr(event.broadcast, 'llm'):
+            return await event.broadcast.llm.text_chat(prompt)
+        if hasattr(event, 'llm'):
+            return await event.llm.text_chat(prompt)
+        return None
 
     def _parse_llm_response(self, resp) -> Optional[Dict]:
         """解析 LLM 返回的 JSON 人格数据"""
