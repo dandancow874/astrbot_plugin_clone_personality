@@ -13,9 +13,9 @@ import re
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 
-from astrbot.api.all import *
-from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Plain, At
+from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
 # ─── 数据存储路径 ────────────────────────────────────────
@@ -86,12 +86,16 @@ def set_active_persona(persona_id: Optional[str]):
 
 
 # ─── 主插件类 ────────────────────────────────────────────
-@register("clone_personality", "群友人格克隆插件", "2.0.0",
-          "提取群友聊天记录克隆人格，支持群聊/私聊，管理员开关")
-class ClonePersonalityPlugin(AstrBotPlugin):
+@register(
+    "clone_personality",
+    "AstrBot Plugin",
+    "提取群友聊天记录克隆人格，支持群聊/私聊，管理员开关",
+    "2.0.0",
+)
+class ClonePersonalityPlugin(Star):
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, context: Context) -> None:
+        super().__init__(context)
 
     async def initialize(self):
         logger.info("群友人格克隆插件 v2.0 已加载")
@@ -99,8 +103,8 @@ class ClonePersonalityPlugin(AstrBotPlugin):
     # ════════════════════════════════════════════════════
     # 1. 克隆指令
     # ════════════════════════════════════════════════════
-    @command("clone")
-    @command("克隆")
+    @filter.command("clone")
+    @filter.command("克隆")
     async def clone_personality(self, event: AstrMessageEvent):
         """
         克隆群友人格。
@@ -249,7 +253,7 @@ class ClonePersonalityPlugin(AstrBotPlugin):
     # ════════════════════════════════════════════════════
     # 2. 管理员注入开关
     # ════════════════════════════════════════════════════
-    @command("管理员注入开关")
+    @filter.command("管理员注入开关")
     async def toggle_admin_inject(self, event: AstrMessageEvent):
         """
         切换「仅管理员可注入设定」开关（仅管理员可用）
@@ -295,7 +299,7 @@ class ClonePersonalityPlugin(AstrBotPlugin):
     # ════════════════════════════════════════════════════
     # 3. 人格切换
     # ════════════════════════════════════════════════════
-    @command("人格切换")
+    @filter.command("人格切换")
     async def switch_personality(self, event: AstrMessageEvent):
         text = event.message_str.strip()
         parts = text.split(maxsplit=1)
@@ -346,7 +350,7 @@ class ClonePersonalityPlugin(AstrBotPlugin):
     # ════════════════════════════════════════════════════
     # 4. 人格列表
     # ════════════════════════════════════════════════════
-    @command("人格列表")
+    @filter.command("人格列表")
     async def list_personalities(self, event: AstrMessageEvent):
         personalities = load_personalities()
         if not personalities:
@@ -374,7 +378,7 @@ class ClonePersonalityPlugin(AstrBotPlugin):
     # ════════════════════════════════════════════════════
     # 5. 人格详情
     # ════════════════════════════════════════════════════
-    @command("人格详情")
+    @filter.command("人格详情")
     async def personality_detail(self, event: AstrMessageEvent):
         text = event.message_str.strip()
         parts = text.split(maxsplit=1)
@@ -429,7 +433,7 @@ class ClonePersonalityPlugin(AstrBotPlugin):
     # ════════════════════════════════════════════════════
     # 6. 人格删除（管理员）
     # ════════════════════════════════════════════════════
-    @command("人格删除")
+    @filter.command("人格删除")
     async def delete_personality(self, event: AstrMessageEvent):
         is_admin = await self._is_admin(event)
         if not is_admin:
