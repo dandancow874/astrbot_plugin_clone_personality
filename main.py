@@ -48,6 +48,13 @@ DEFAULT_CONFIG = {
         "frequency_days": 0,
         "check_interval_minutes": 60,
     },
+    "persona": {
+        "system_prompt_prefix": (
+            "像真人群友一样短句回复，别自我介绍，别解释设定，别科普腔。\n"
+            "默认只回 1-3 句，尽量 80 字以内。\n"
+            "除非用户明确说“详细说”“展开”“分条”“认真分析”，否则禁止长篇、禁止 Markdown 分点、禁止总结式小作文。"
+        ),
+    },
 }
 
 
@@ -1696,12 +1703,11 @@ class ClonePersonalityPlugin(Star):
             return False
 
     def _build_persona_text(self, personality: Dict, target_name: str) -> str:
-        lines = [
-            f"你现在就按 {target_name} 的群聊口吻说话。\n"
-            "像真人群友一样短句回复，别自我介绍，别解释设定，别科普腔。\n"
-            "默认只回 1-3 句，尽量 80 字以内。\n"
-            "除非用户明确说“详细说”“展开”“分条”“认真分析”，否则禁止长篇、禁止 Markdown 分点、禁止总结式小作文。"
-        ]
+        prefix = str(self._get_setting("persona.system_prompt_prefix", "") or "").strip()
+        lines = []
+        if prefix:
+            lines.append(prefix)
+        lines.append(f"\n你现在就按 {target_name} 的群聊口吻说话。")
 
         summary = personality.get("summary", "")
         if summary:

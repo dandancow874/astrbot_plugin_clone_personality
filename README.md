@@ -83,8 +83,17 @@ AstrBot 群友人格克隆插件。插件会读取目标群友的群聊历史，
 | `message.max_message_chars` | 单条消息最大字符数 |
 | `message.max_prompt_chars` | 送入模型的聊天记录总字符预算 |
 | `admin_only_inject` | 打开后仅管理员克隆时会创建/更新 AstrBot 人格 |
+| `persona.system_prompt_prefix` | 创建/更新人格时拼在人格设定最前面的 System Prompt |
 | `auto_update.frequency_days` | 人格自动更新频率，单位为天；`0` 表示关闭 |
 | `auto_update.check_interval_minutes` | 后台检查是否有人格到期的间隔 |
+
+`persona.system_prompt_prefix` 适合放统一口吻约束，例如：
+
+```text
+像真人群友一样短句回复，别自我介绍，别解释设定，别科普腔。
+默认只回 1-3 句，尽量 80 字以内。
+除非用户明确说“详细说”“展开”“分条”“认真分析”，否则禁止长篇、禁止 Markdown 分点、禁止总结式小作文。
+```
 
 ## 定期更新
 
