@@ -124,7 +124,7 @@
         "type": "int",
         "slider": {
           "min": 10,
-          "max": 1440,
+          "max": 10080,
           "step": 10
         },
         "default": 60
