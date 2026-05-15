@@ -11,6 +11,7 @@ import json
 import os
 import re
 import asyncio
+import shutil
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 
@@ -22,10 +23,50 @@ from astrbot.api import logger
 
 # ─── 数据存储路径 ────────────────────────────────────────
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-PERSONALITIES_FILE = os.path.join(PLUGIN_DIR, "personalities.json")
-ACTIVE_PERSONA_FILE = os.path.join(PLUGIN_DIR, "active_persona.txt")
-ACTIVE_SESSIONS_FILE = os.path.join(PLUGIN_DIR, "active_sessions.json")
-CONFIG_FILE = os.path.join(PLUGIN_DIR, "config.json")
+PLUGIN_NAME = "clone_personality"
+
+
+def _resolve_data_dir() -> str:
+    """运行数据必须放在 AstrBot data 下，避免插件更新时被覆盖。"""
+    env_data_dir = os.environ.get("ASTRBOT_DATA_DIR")
+    if env_data_dir:
+        base_dir = env_data_dir
+    elif os.path.isdir("/AstrBot/data") or PLUGIN_DIR.startswith("/AstrBot/"):
+        base_dir = "/AstrBot/data"
+    else:
+        base_dir = os.path.join(PLUGIN_DIR, "data")
+
+    return os.path.join(base_dir, "plugin_data", PLUGIN_NAME)
+
+
+DATA_DIR = _resolve_data_dir()
+os.makedirs(DATA_DIR, exist_ok=True)
+
+PERSONALITIES_FILE = os.path.join(DATA_DIR, "personalities.json")
+ACTIVE_PERSONA_FILE = os.path.join(DATA_DIR, "active_persona.txt")
+ACTIVE_SESSIONS_FILE = os.path.join(DATA_DIR, "active_sessions.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+
+
+def _migrate_legacy_data_file(filename: str) -> None:
+    legacy_path = os.path.join(PLUGIN_DIR, filename)
+    target_path = os.path.join(DATA_DIR, filename)
+    if os.path.exists(target_path) or not os.path.exists(legacy_path):
+        return
+    try:
+        shutil.copy2(legacy_path, target_path)
+        logger.info(f"已迁移插件数据: {legacy_path} -> {target_path}")
+    except Exception as e:
+        logger.warning(f"迁移插件数据失败 {filename}: {e}")
+
+
+for _data_filename in (
+    "personalities.json",
+    "active_persona.txt",
+    "active_sessions.json",
+    "config.json",
+):
+    _migrate_legacy_data_file(_data_filename)
 
 
 # ─── 配置管理 ────────────────────────────────────────────
@@ -1843,7 +1884,7 @@ class ClonePersonalityPlugin(Star):
                     logger.warning(f"通过 PersonaManager 注入失败: {e}")
 
             # PersonaManager 不可用或失败时只保存本地文件，不声称已注入 AstrBot。
-            persona_file = os.path.join(PLUGIN_DIR, "current_persona.txt")
+            persona_file = os.path.join(DATA_DIR, "current_persona.txt")
             with open(persona_file, "w", encoding="utf-8") as f:
                 f.write(persona_text)
             logger.info(f"人格已保存到 {persona_file}")
