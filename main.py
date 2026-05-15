@@ -287,7 +287,7 @@ class ClonePersonalityPlugin(Star):
         for pid, data in personalities.items():
             group_id = str(data.get("group_id", "")).strip()
             user_id = str(data.get("user_id", "")).strip()
-            if not group_id or not user_id:
+            if not group_id or not user_id.isdigit():
                 continue
 
             last_text = (
@@ -1126,11 +1126,24 @@ class ClonePersonalityPlugin(Star):
             )
             return
 
+        personalities = load_personalities()
+        existing = personalities.get(persona_id)
         if group_id:
             imported["group_id"] = group_id
             imported["persona_name"] = f"{group_id}{imported.get('user_name', persona_id)}"
+            if (
+                isinstance(existing, dict)
+                and str(existing.get("group_id", "")).strip() == group_id
+                and str(existing.get("user_id", "")).strip().isdigit()
+            ):
+                imported["user_id"] = str(existing.get("user_id")).strip()
+            else:
+                resolved_user_id = await self._resolve_persona_user_id(
+                    event, group_id, persona_id, imported
+                )
+                if resolved_user_id:
+                    imported["user_id"] = resolved_user_id
 
-        personalities = load_personalities()
         existed = persona_id in personalities
         personalities[persona_id] = imported
         save_personalities(personalities)
@@ -1182,10 +1195,21 @@ class ClonePersonalityPlugin(Star):
             )
             return
 
-        if not str(data.get("user_id", "")).strip():
+        user_id_text = str(data.get("user_id", "")).strip()
+        if not user_id_text.isdigit():
+            resolved_user_id = await self._resolve_persona_user_id(
+                event, group_id, pid, data
+            )
+            if resolved_user_id:
+                data["user_id"] = resolved_user_id
+                personalities[pid] = data
+                save_personalities(personalities)
+                user_id_text = resolved_user_id
+
+        if not user_id_text.isdigit():
             yield event.plain_result(
-                f"❌ 人格「{pid}」缺少 QQ 号，无法抓取聊天记录更新。\n"
-                f"如果它是从 AstrBot 人格设定导入的，需要重新克隆一次补齐元数据。"
+                f"❌ 人格「{pid}」缺少真实 QQ 号，无法抓取聊天记录更新。\n"
+                f"它可能是从 AstrBot 人格设定导入的，但没有匹配到同名群成员。"
             )
             return
 
@@ -1409,6 +1433,34 @@ class ClonePersonalityPlugin(Star):
                 candidates.append(str(user_id))
 
         return candidates[0] if len(candidates) == 1 else None
+
+    async def _resolve_persona_user_id(self, event, group_id: Any, pid: str,
+                                       data: Dict) -> Optional[str]:
+        """导入的 AstrBot 人格可能没有 QQ 元数据，按群名片/昵称尽力补齐。"""
+        if not group_id:
+            return None
+
+        candidates = [
+            str(data.get("user_name", "")).strip(),
+            str(data.get("persona_name", "")).strip(),
+            str(pid or "").strip(),
+        ]
+
+        seen = set()
+        for name in candidates:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            try:
+                resolved = await self._resolve_group_member_id(
+                    event, int(group_id), name
+                )
+            except Exception:
+                resolved = None
+            if resolved and str(resolved).isdigit():
+                return str(resolved)
+
+        return None
 
     async def _get_group_member_display_name(self, event, group_id: int,
                                              user_id: Any) -> Optional[str]:
