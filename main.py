@@ -40,13 +40,17 @@ DEFAULT_CONFIG = {
         "history_slice": ":100",
         "max_fetch_rounds": 50,
         "per_query_count": 200,
+        "initial_analysis_messages": 240,
+        "update_analysis_messages": 120,
         "max_analysis_messages": 80,
         "max_message_chars": 180,
         "max_prompt_chars": 12000,
     },
     "auto_update": {
-        "frequency_days": 0,
-        "check_interval_minutes": 60,
+        "enabled": False,
+        "check_weekday": 0,
+        "check_hour": 0,
+        "stale_days": 7,
     },
     "persona": {
         "system_prompt_prefix": (
@@ -145,6 +149,7 @@ class ClonePersonalityPlugin(Star):
         self.plugin_cfg = config
         self._auto_update_task = None
         self._last_event = None
+        self._last_auto_update_check_key = None
 
     async def initialize(self):
         logger.info("群友人格克隆插件 v2.0 已加载")
@@ -197,21 +202,37 @@ class ClonePersonalityPlugin(Star):
     async def _auto_update_loop(self):
         while True:
             try:
-                interval = int(self._get_setting(
-                    "auto_update.check_interval_minutes",
-                    60,
-                ))
-                await asyncio.sleep(max(interval, 5) * 60)
-                await self._auto_update_due_personalities()
+                await asyncio.sleep(60)
+                if self._should_run_auto_update_now():
+                    await self._auto_update_due_personalities()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"定期更新人格失败: {e}")
 
+    def _should_run_auto_update_now(self) -> bool:
+        if not bool(self._get_setting("auto_update.enabled", False)):
+            return False
+
+        now = datetime.now()
+        check_weekday = int(self._get_setting("auto_update.check_weekday", 0))
+        check_hour = int(self._get_setting("auto_update.check_hour", 0))
+
+        if now.hour != check_hour:
+            return False
+        if check_weekday not in range(0, 8):
+            check_weekday = 0
+        if check_weekday != 0 and now.isoweekday() != check_weekday:
+            return False
+
+        check_key = f"{now.date().isoformat()}:{check_hour}"
+        if self._last_auto_update_check_key == check_key:
+            return False
+        self._last_auto_update_check_key = check_key
+        return True
+
     async def _auto_update_due_personalities(self) -> None:
-        frequency_days = int(self._get_setting("auto_update.frequency_days", 0))
-        if frequency_days <= 0:
-            return
+        stale_days = int(self._get_setting("auto_update.stale_days", 7))
         if not self._last_event:
             logger.debug("定期更新跳过：还没有可用的 bot 事件上下文")
             return
@@ -239,7 +260,7 @@ class ClonePersonalityPlugin(Star):
             except Exception:
                 last_at = datetime.min
 
-            if now - last_at >= timedelta(days=frequency_days):
+            if stale_days <= 0 or now - last_at >= timedelta(days=stale_days):
                 due_items.append((pid, data))
 
         if not due_items:
@@ -269,7 +290,11 @@ class ClonePersonalityPlugin(Star):
 
             end_time = datetime.now()
             initial_days = int(self._get_setting("message.initial_days", 30))
-            history_slice = str(self._get_setting("message.history_slice", ":100"))
+            update_limit = self._get_analysis_message_limit("update")
+            history_slice = self._expand_history_slice(
+                str(self._get_setting("message.history_slice", ":100")),
+                update_limit,
+            )
 
             messages = await self._fetch_user_messages(
                 event=self._last_event,
@@ -279,6 +304,7 @@ class ClonePersonalityPlugin(Star):
                 start=(end_time - timedelta(days=initial_days)).strftime("%Y-%m-%d"),
                 end=end_time.strftime("%Y-%m-%d %H:%M"),
                 slice=history_slice,
+                max_messages=update_limit,
             )
             if isinstance(messages, dict):
                 messages = messages.get("messages", [])
@@ -289,10 +315,13 @@ class ClonePersonalityPlugin(Star):
                 self._last_event,
                 messages,
                 target_name,
+                existing_personality=data,
+                max_messages=update_limit,
             )
             if not personality:
                 return None
 
+            personality = self._merge_personality_update(data, personality)
             personality["user_id"] = str(user_id)
             personality["user_name"] = target_name
             personality["persona_name"] = data.get("persona_name", f"{group_id}{target_name}")
@@ -300,6 +329,7 @@ class ClonePersonalityPlugin(Star):
             personality["created_at"] = data.get("created_at", datetime.now().isoformat())
             personality["updated_at"] = datetime.now().isoformat()
             personality["last_auto_update_at"] = datetime.now().isoformat()
+            personality["update_mode"] = "incremental"
             personality["message_count"] = len(messages)
 
             personalities = load_personalities()
@@ -665,8 +695,18 @@ class ClonePersonalityPlugin(Star):
             pid = self._build_persona_id(target_name, target_uid)
             persona_name = f"{group_id}{target_name}"
 
-        # ── 重复 ID 直接覆盖（不弹提示） ──
+        # ── 同名同人默认增量更新；-f/--force 强制从零重建 ──
         personalities = load_personalities()
+        existing_personality = personalities.get(pid)
+        same_saved_person = (
+            isinstance(existing_personality, dict)
+            and str(existing_personality.get("group_id", "")) == str(group_id)
+            and str(existing_personality.get("user_id", "")) == str(target_uid)
+        )
+        incremental_update = bool(same_saved_person and not force_refresh)
+        analysis_limit = self._get_analysis_message_limit(
+            "update" if incremental_update else "initial"
+        )
 
         # ── 获取聊天记录 ──
         yield event.plain_result(f"🤏 一把抓住 {target_name}(群 {group_id})，顷刻炼化...")
@@ -675,7 +715,10 @@ class ClonePersonalityPlugin(Star):
             end_time = datetime.now()
             initial_days = int(self._get_setting("message.initial_days", 30))
             fallback_days = int(self._get_setting("message.fallback_days", 90))
-            history_slice = str(self._get_setting("message.history_slice", ":100"))
+            history_slice = self._expand_history_slice(
+                str(self._get_setting("message.history_slice", ":100")),
+                analysis_limit,
+            )
 
             start_time = end_time - timedelta(days=initial_days)
 
@@ -687,6 +730,7 @@ class ClonePersonalityPlugin(Star):
                 start=start_time.strftime("%Y-%m-%d"),
                 end=end_time.strftime("%Y-%m-%d %H:%M"),
                 slice=history_slice,
+                max_messages=analysis_limit,
             )
             if isinstance(messages, dict):
                 messages = messages.get("messages", [])
@@ -701,6 +745,7 @@ class ClonePersonalityPlugin(Star):
                     start=start_time.strftime("%Y-%m-%d"),
                     end=end_time.strftime("%Y-%m-%d %H:%M"),
                     slice=history_slice,
+                    max_messages=analysis_limit,
                 )
                 if isinstance(messages, dict):
                     messages = messages.get("messages", [])
@@ -724,17 +769,28 @@ class ClonePersonalityPlugin(Star):
             event,
             messages,
             target_name,
+            existing_personality=existing_personality if incremental_update else None,
+            max_messages=analysis_limit,
         )
         if not personality:
             yield event.plain_result("❌ 人格分析失败，请稍后重试。")
             return
+
+        if incremental_update:
+            personality = self._merge_personality_update(existing_personality, personality)
 
         # ── 保存人格（覆盖旧数据） ──
         personality["user_id"] = str(target_uid)
         personality["user_name"] = target_name
         personality["persona_name"] = persona_name
         personality["group_id"] = str(group_id)
-        personality["created_at"] = datetime.now().isoformat()
+        personality["created_at"] = (
+            existing_personality.get("created_at")
+            if incremental_update and isinstance(existing_personality, dict)
+            else datetime.now().isoformat()
+        )
+        personality["updated_at"] = datetime.now().isoformat()
+        personality["update_mode"] = "incremental" if incremental_update else "full"
         personality["message_count"] = len(messages)
 
         personalities[pid] = personality
@@ -993,7 +1049,8 @@ class ClonePersonalityPlugin(Star):
     async def _fetch_user_messages(self, event, user_id: int, group_id: int,
                                    target_name: str,
                                    start: str, end: str,
-                                   slice: str = ":100") -> Any:
+                                   slice: str = ":100",
+                                   max_messages: Optional[int] = None) -> Any:
         """获取指定用户的聊天记录"""
         messages = []
 
@@ -1003,6 +1060,7 @@ class ClonePersonalityPlugin(Star):
                 user_id=user_id,
                 group_id=group_id,
                 target_name=target_name,
+                max_messages=max_messages,
             )
             messages = history_result.get("messages", [])
             if messages:
@@ -1024,28 +1082,36 @@ class ClonePersonalityPlugin(Star):
                                     or item.get("content", ""))
                         if msg_text:
                             messages.append(str(msg_text))
+                            if max_messages and len(messages) >= max_messages:
+                                break
                     elif isinstance(item, str):
                         messages.append(item)
+                        if max_messages and len(messages) >= max_messages:
+                            break
             elif isinstance(result, str):
                 for line in result.strip().split("\n"):
                     line = line.strip()
                     if line:
                         messages.append(line)
+                        if max_messages and len(messages) >= max_messages:
+                            break
         except Exception as e:
             logger.error(f"获取用户消息失败: {e}")
 
-        return messages
+        return messages[:max_messages] if max_messages else messages
 
     async def _fetch_user_messages_from_group_history(self, event, user_id: int,
                                                       group_id: int,
-                                                      target_name: str) -> Dict[str, List[str]]:
+                                                      target_name: str,
+                                                      max_messages: Optional[int] = None
+                                                      ) -> Dict[str, List[str]]:
         """通过 aiocqhttp/OneBot 的 get_group_msg_history 扫描群历史。"""
         if not hasattr(event, "bot") or not hasattr(event.bot, "api"):
             return {"messages": []}
 
         max_rounds = int(self._get_setting("message.max_fetch_rounds", 50))
         per_query_count = int(self._get_setting("message.per_query_count", 200))
-        max_count = int(self._get_setting("message.max_analysis_messages", 80))
+        max_count = max_messages or self._get_analysis_message_limit("initial")
 
         texts = []
         message_seq = 0
@@ -1202,12 +1268,21 @@ class ClonePersonalityPlugin(Star):
         return []
 
     async def _analyze_personality(self, event, messages: List[str],
-                                   target_name: str) -> Optional[Dict]:
+                                   target_name: str,
+                                   existing_personality: Optional[Dict] = None,
+                                   max_messages: Optional[int] = None
+                                   ) -> Optional[Dict]:
         """调用大模型分析人格特征"""
-        sample = self._prepare_analysis_messages(messages)
+        sample = self._prepare_analysis_messages(messages, max_messages=max_messages)
         chat_text = "\n".join([f"- {m}" for m in sample])
+        mode_instruction = self._build_analysis_mode_instruction(
+            target_name,
+            existing_personality,
+        )
 
-        prompt = f"""你是一位人格分析专家。请分析以下 "{target_name}" 的聊天记录，提取其人格特征。
+        prompt = f"""你是一位人格分析专家。请分析 "{target_name}" 的聊天记录，提取其人格特征。
+
+{mode_instruction}
 
 要求：
 1. 严格基于提供的聊天记录进行分析
@@ -1216,6 +1291,7 @@ class ClonePersonalityPlugin(Star):
 4. “骚话/爆点语录/行为范例”必须尽量摘原始聊天里的原话，不要为了好看自行编造
 5. 骚话/爆点语录宁缺毋滥：只有明显有梗、有攻击性、有反差、有抽象感、有口癖或有传播感的句子才收录；普通陈述、无趣吐槽、泛泛观点不要硬凑
 6. 如果原始聊天里没有足够爆点语录，signature_quotes 返回空数组 []，不要为了凑数量填普通句子
+7. 输出必须是完整的新版人格 JSON，不要只输出本次变化
 
 请按以下 JSON 格式输出（不要包含其他内容，只输出 JSON）：
 {{
@@ -1256,7 +1332,9 @@ class ClonePersonalityPlugin(Star):
     ],
     "traits": {{}},
     "interests": ["从聊天中推断的兴趣爱好或话题偏好（最多8个）"],
-    "emotional_pattern": "情绪模式：描述其情绪表达、脆弱点、攻击性、玩梗节奏或亲密关系里的反差。"
+    "emotional_pattern": "情绪模式：描述其情绪表达、脆弱点、攻击性、玩梗节奏或亲密关系里的反差。",
+    "recent_changes": ["定期更新时发现的近期变化（0-5条）；从零创建时返回空数组"],
+    "last_update_summary": "定期更新摘要；从零创建时返回空字符串"
 }}
 
 以下是 "{target_name}" 的聊天记录：
@@ -1275,9 +1353,88 @@ class ClonePersonalityPlugin(Star):
             logger.error(f"调用大模型分析人格失败: {e}")
             return None
 
-    def _prepare_analysis_messages(self, messages: List[str]) -> List[str]:
+    def _get_analysis_message_limit(self, mode: str = "initial") -> int:
+        legacy = int(self._get_setting("message.max_analysis_messages", 80))
+        if mode == "update":
+            return int(self._get_setting("message.update_analysis_messages", 120) or legacy)
+        return int(self._get_setting("message.initial_analysis_messages", 240) or legacy)
+
+    def _expand_history_slice(self, slice_value: str, min_count: int) -> str:
+        """备用搜索工具使用 Python slice 语法；纯 :N 时按分析条数自动抬高。"""
+        match = re.fullmatch(r":(\d+)", str(slice_value or "").strip())
+        if not match:
+            return slice_value
+        count = max(int(match.group(1)), int(min_count))
+        return f":{count}"
+
+    def _build_analysis_mode_instruction(self, target_name: str,
+                                         existing_personality: Optional[Dict]
+                                         ) -> str:
+        if not existing_personality:
+            return (
+                f"你正在从零创建 QQ 用户“{target_name}”的人格画像。"
+                "请只根据本次聊天记录归纳，不要编造记录里没有的事实。"
+            )
+
+        old_persona = self._format_existing_personality_for_update(
+            existing_personality
+        )
+        return f"""你正在更新 QQ 用户“{target_name}”的已有人格画像。
+旧人格是长期画像，权重高于本次新消息；本次聊天记录只用于补充、修正和发现近期变化。
+不要因为短期话题、临时情绪或少量新消息推翻旧人格；只有反复出现、非常明确的新特征才写入主画像。
+如果新消息信息量不足，保留旧人格主体，只补充少量近期变化。
+输出完整新版 JSON，并在 recent_changes / last_update_summary 里简短说明本次更新改了什么。
+
+以下是旧人格长期画像：
+{old_persona}"""
+
+    def _format_existing_personality_for_update(self, personality: Dict) -> str:
+        keys = (
+            "identity",
+            "summary",
+            "speaking_style",
+            "values_and_boundaries",
+            "trigger_reactions",
+            "common_phrases",
+            "signature_quotes",
+            "behavior_examples",
+            "avoidances",
+            "traits",
+            "interests",
+            "emotional_pattern",
+        )
+        compact = {
+            key: personality.get(key)
+            for key in keys
+            if personality.get(key) not in (None, "", [], {})
+        }
+        return json.dumps(compact, ensure_ascii=False, indent=2)
+
+    def _merge_personality_update(self, old: Dict, new: Dict) -> Dict:
+        """自动更新时保留旧画像的稳定字段，避免少量新消息把人格清空。"""
+        stable_fields = (
+            "identity",
+            "summary",
+            "speaking_style",
+            "values_and_boundaries",
+            "trigger_reactions",
+            "common_phrases",
+            "signature_quotes",
+            "behavior_examples",
+            "avoidances",
+            "traits",
+            "interests",
+            "emotional_pattern",
+        )
+        for key in stable_fields:
+            if new.get(key) in (None, "", [], {}) and old.get(key) not in (None, "", [], {}):
+                new[key] = old.get(key)
+        return new
+
+    def _prepare_analysis_messages(self, messages: List[str],
+                                   max_messages: Optional[int] = None) -> List[str]:
         """按配置压缩聊天记录，避免超过模型上下文。"""
-        max_count = int(self._get_setting("message.max_analysis_messages", 80))
+        max_count = max_messages or self._get_analysis_message_limit("initial")
         max_msg_chars = int(self._get_setting("message.max_message_chars", 180))
         max_prompt_chars = int(self._get_setting("message.max_prompt_chars", 12000))
 
@@ -1411,6 +1568,16 @@ class ClonePersonalityPlugin(Star):
         summary = str(personality.get("summary", "")).strip()
         if summary:
             lines.extend(["", summary])
+
+        self._append_numbered_section(
+            lines,
+            "近期变化",
+            personality.get("recent_changes", []),
+        )
+
+        update_summary = str(personality.get("last_update_summary", "")).strip()
+        if update_summary:
+            lines.extend(["", "本次更新", update_summary])
 
         self._append_numbered_section(
             lines,
@@ -1549,6 +1716,8 @@ class ClonePersonalityPlugin(Star):
             "behavior_examples": [],
             "interests": [],
             "emotional_pattern": "",
+            "recent_changes": [],
+            "last_update_summary": "",
             "reply_rules": [],
             "avoidances": [],
         }
@@ -1557,6 +1726,19 @@ class ClonePersonalityPlugin(Star):
         data["signature_quotes"] = self._filter_signature_quotes(
             data.get("signature_quotes", [])
         )
+        recent_changes = data.get("recent_changes", [])
+        if isinstance(recent_changes, str):
+            recent_changes = [recent_changes] if recent_changes.strip() else []
+        if not isinstance(recent_changes, list):
+            recent_changes = []
+        data["recent_changes"] = [
+            str(item).strip()
+            for item in recent_changes
+            if str(item).strip()
+        ][:5]
+        data["last_update_summary"] = str(
+            data.get("last_update_summary", "") or ""
+        ).strip()
         return data
 
     def _filter_signature_quotes(self, quotes: Any) -> List[str]:
@@ -1716,6 +1898,12 @@ class ClonePersonalityPlugin(Star):
         summary = personality.get("summary", "")
         if summary:
             lines.append(f"\n【人格摘要】\n{summary}")
+
+        recent_changes = personality.get("recent_changes", [])
+        if recent_changes:
+            lines.append("\n【近期变化】")
+            for item in recent_changes:
+                lines.append(f"- {item}")
 
         identity = personality.get("identity", "")
         if identity:

@@ -37,8 +37,8 @@
         "default": 90
       },
       "history_slice": {
-        "description": "聊天记录工具 slice 参数",
-        "hint": "例如 :100 表示最多取 100 条，具体含义取决于 search_qq_chat_history 工具",
+        "description": "备用历史工具 slice 参数",
+        "hint": "仅在 get_group_msg_history 不可用、回退到 search_qq_chat_history 时使用。例如 :100 表示取前 100 条，冒号来自 Python 切片语法。",
         "type": "string",
         "default": ":100"
       },
@@ -63,9 +63,31 @@
         },
         "default": 200
       },
+      "initial_analysis_messages": {
+        "description": "首次克隆分析消息数",
+        "hint": "首次创建人格时用于分析的目标发言条数。建议 200-300，越大越准但更耗 Token。",
+        "type": "int",
+        "slider": {
+          "min": 50,
+          "max": 500,
+          "step": 10
+        },
+        "default": 240
+      },
+      "update_analysis_messages": {
+        "description": "增量更新分析消息数",
+        "hint": "同名同群同 QQ 人格手动克隆、定期更新时使用。建议 80-150。",
+        "type": "int",
+        "slider": {
+          "min": 20,
+          "max": 300,
+          "step": 10
+        },
+        "default": 120
+      },
       "max_analysis_messages": {
-        "description": "用于分析的最大消息条数",
-        "hint": "越大越准，但更消耗上下文和 Token",
+        "description": "旧版兼容：用于分析的最大消息条数",
+        "hint": "保留给旧配置兼容。新逻辑优先使用“首次克隆分析消息数”和“增量更新分析消息数”。",
         "type": "int",
         "slider": {
           "min": 20,
@@ -119,27 +141,44 @@
     "description": "定期更新",
     "type": "object",
     "items": {
-      "frequency_days": {
-        "description": "人格自动更新频率（日）",
-        "hint": "0 表示关闭。开启后，到期的人格会重新抓取聊天记录并覆盖更新，更新完成后在对应群发送一句提醒。",
+      "enabled": {
+        "description": "启用自动更新",
+        "type": "bool",
+        "hint": "关闭后不会自动检查或更新人格。",
+        "default": false
+      },
+      "check_weekday": {
+        "description": "每周几检查",
+        "hint": "0 表示每天；1 表示周一；7 表示周日。",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 7,
+          "step": 1
+        },
+        "default": 0
+      },
+      "check_hour": {
+        "description": "几点检查",
+        "hint": "0-23，0 表示凌晨 0 点。",
+        "type": "int",
+        "slider": {
+          "min": 0,
+          "max": 23,
+          "step": 1
+        },
+        "default": 0
+      },
+      "stale_days": {
+        "description": "更新频率（天）",
+        "hint": "检查人格文件的更新时间，超过这个天数才更新。0 表示不限制天数，到检查时间就更新所有人格。",
         "type": "int",
         "slider": {
           "min": 0,
           "max": 30,
           "step": 1
         },
-        "default": 0
-      },
-      "check_interval_minutes": {
-        "description": "后台检查间隔（分钟）",
-        "hint": "插件按这个间隔检查是否有人格到期；不是每次都更新。",
-        "type": "int",
-        "slider": {
-          "min": 10,
-          "max": 10080,
-          "step": 10
-        },
-        "default": 60
+        "default": 7
       }
     }
   }

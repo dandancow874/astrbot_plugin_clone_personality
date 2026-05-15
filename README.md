@@ -77,15 +77,20 @@ AstrBot 群友人格克隆插件。插件会读取目标群友的群聊历史，
 | `llm.provider_id` | 选择用于人格分析的 AstrBot 模型提供商，留空使用当前默认模型 |
 | `message.initial_days` | 优先查询最近多少天的群聊记录 |
 | `message.fallback_days` | 首次无记录时扩大查询范围 |
+| `message.history_slice` | 备用历史工具参数，仅 `search_qq_chat_history` fallback 使用；例如 `:100` 表示取前 100 条 |
 | `message.max_fetch_rounds` | 群历史最大扫描轮数 |
 | `message.per_query_count` | 每轮拉取群消息条数 |
-| `message.max_analysis_messages` | 用于分析的目标消息条数上限 |
+| `message.initial_analysis_messages` | 首次克隆分析消息数，建议 200-300 |
+| `message.update_analysis_messages` | 增量更新分析消息数，建议 80-150 |
+| `message.max_analysis_messages` | 旧版兼容字段，新逻辑优先使用上面两个字段 |
 | `message.max_message_chars` | 单条消息最大字符数 |
 | `message.max_prompt_chars` | 送入模型的聊天记录总字符预算 |
 | `admin_only_inject` | 打开后仅管理员克隆时会创建/更新 AstrBot 人格 |
 | `persona.system_prompt_prefix` | 创建/更新人格时拼在人格设定最前面的 System Prompt |
-| `auto_update.frequency_days` | 人格自动更新频率，单位为天；`0` 表示关闭 |
-| `auto_update.check_interval_minutes` | 后台检查是否有人格到期的间隔 |
+| `auto_update.enabled` | 是否启用自动更新 |
+| `auto_update.check_weekday` | 每周几检查；`0` 每天，`1` 周一，`7` 周日 |
+| `auto_update.check_hour` | 几点检查；`0-23` |
+| `auto_update.stale_days` | 更新频率，超过多少天未更新才更新；`0` 表示到检查时间更新所有人格 |
 
 `persona.system_prompt_prefix` 适合放统一口吻约束，例如：
 
@@ -101,12 +106,26 @@ AstrBot 群友人格克隆插件。插件会读取目标群友的群聊历史，
 
 ## 定期更新
 
-在 WebUI 中把 `auto_update.frequency_days` 设置为大于 0 后，插件会定期检查已保存人格。
+在 WebUI 中打开 `auto_update.enabled` 后，插件会按 `check_weekday` 和 `check_hour` 定时检查已保存人格。
+
+示例：
+
+```text
+enabled = true
+check_weekday = 1
+check_hour = 3
+stale_days = 7
+```
+
+表示每周一凌晨 3 点检查一次，只更新超过 7 天没更新的人格。
+
+如果 `stale_days = 0`，表示不限制天数，到检查时间就更新所有人格。
 
 到期后会：
 
 - 按人格保存的 `group_id` 和 `user_id` 重新抓取该群里的目标发言。
-- 重新分析并覆盖 `personalities.json` 中的人格数据。
+- 把旧人格作为长期画像，把最新聊天记录作为增量材料进行更新；旧画像权重更高，新消息只用于补充或修正明确变化。
+- 覆盖 `personalities.json` 中的人格数据；如果模型没有输出某些稳定字段，会保留旧人格里的对应内容，避免最近少量消息把画像冲掉。
 - 尝试同步更新 AstrBot 人格系统里的同名人格。
 - 更新完后在对应群发一句提醒，例如：
 
@@ -115,6 +134,14 @@ AstrBot 群友人格克隆插件。插件会读取目标群友的群聊历史，
 ```
 
 注意：后台更新需要插件运行期间至少收到过一次消息，才能拿到可用的 OneBot API 上下文。
+
+## 同名人格
+
+手动执行 `克隆 <目标>` 时：
+
+- 如果人格 ID 已存在，且保存的 `group_id` 和 `user_id` 与本次目标一致，默认走增量更新。
+- 如果加 `-f` 或 `--force`，会强制从零重建并覆盖旧人格。
+- 如果人格 ID 已存在，但 `group_id` 或 `user_id` 不一致，会按新人格从零分析后覆盖，避免把两个同名群友混在一起。
 
 ## 上下文控制
 
