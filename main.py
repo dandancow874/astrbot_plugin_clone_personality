@@ -578,6 +578,8 @@ class ClonePersonalityPlugin(Star):
             ("人格切换", self.switch_personality),
             ("人格列表", self.list_personalities),
             ("人格详情", self.personality_detail),
+            ("人格导入", self.import_personality),
+            ("人格更新", self.update_personality),
             ("人格删除", self.delete_personality),
         )
         for command_name, handler in handlers:
@@ -980,9 +982,36 @@ class ClonePersonalityPlugin(Star):
             )
             return
 
+        text = self._strip_bot_mentions(event.message_str.strip())
+        parts = text.split(maxsplit=1)
+        event_group_id = self._get_event_group_id(event)
+        group_filter = str(event_group_id).strip() if event_group_id else ""
+        if not group_filter and len(parts) > 1:
+            arg = parts[1].strip()
+            if arg.isdigit():
+                group_filter = str(int(arg))
+
+        filtered = self._filter_personalities_for_group(
+            personalities,
+            group_filter or None,
+        )
+        if not filtered:
+            if group_filter:
+                yield event.plain_result(
+                    f"📭 群 {group_filter} 暂无已克隆的人格。\n"
+                    f"💡 私聊可用「克隆 {group_filter} <QQ号/群名片>」，群聊可用「@bot 克隆 @群友」。"
+                )
+            else:
+                yield event.plain_result(
+                    "📭 暂无可显示的人格。\n"
+                    "💡 私聊查看指定群可用「人格列表 <群号>」。"
+                )
+            return
+
         active = get_active_persona()
-        lines = ["📋 已克隆的人格列表：", "━━━━━━━━━━━━━━━━"]
-        for pid, data in personalities.items():
+        title = f"📋 群 {group_filter} 的人格列表：" if group_filter else "📋 已克隆的人格列表："
+        lines = [title, "━━━━━━━━━━━━━━━━"]
+        for pid, data in filtered.items():
             marker = " 👈 当前" if pid == active else ""
             name = data.get("persona_name", data.get("user_name", "未知"))
             msg_cnt = data.get("message_count", 0)
@@ -994,6 +1023,17 @@ class ClonePersonalityPlugin(Star):
         lines.append("💡 使用「人格切换 <人格ID>」切换人格")
 
         yield event.plain_result("\n".join(lines))
+
+    def _filter_personalities_for_group(self, personalities: Dict[str, Dict],
+                                        group_id: Optional[str]) -> Dict[str, Dict]:
+        if not group_id:
+            return personalities
+        group_id = str(group_id).strip()
+        return {
+            pid: data
+            for pid, data in personalities.items()
+            if str(data.get("group_id", "")).strip() == group_id
+        }
 
     # ════════════════════════════════════════════════════
     # 5. 人格详情
@@ -1052,7 +1092,124 @@ class ClonePersonalityPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
     # ════════════════════════════════════════════════════
-    # 6. 人格删除（管理员）
+    # 6. 从 AstrBot 人格库导入
+    # ════════════════════════════════════════════════════
+    @filter.command("人格导入")
+    async def import_personality(self, event: AstrMessageEvent):
+        is_admin = await self._is_admin(event)
+        if not is_admin:
+            yield event.plain_result("❌ 只有管理员可以导入人格。")
+            return
+
+        text = self._strip_bot_mentions(event.message_str.strip())
+        parts = text.split()
+        event_group_id = self._get_event_group_id(event)
+        group_id = str(event_group_id).strip() if event_group_id else ""
+
+        if event_group_id:
+            persona_id = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            if len(parts) >= 3 and parts[1].isdigit():
+                group_id = str(int(parts[1]))
+                persona_id = parts[2].strip()
+            else:
+                persona_id = parts[1].strip() if len(parts) > 1 else ""
+
+        if not persona_id:
+            yield event.plain_result(
+                "群聊用法：人格导入 <人格ID>\n"
+                "私聊用法：人格导入 <群号> <人格ID>\n"
+                "例如：人格导入 477065120 cbaba"
+            )
+            return
+
+        imported = await self._import_astrbot_persona(persona_id)
+        if not imported:
+            yield event.plain_result(
+                f"❌ 未能从 AstrBot 人格设定中读取「{persona_id}」。\n"
+                f"请确认设置页里的人格ID完全一致。"
+            )
+            return
+
+        if group_id:
+            imported["group_id"] = group_id
+            imported["persona_name"] = f"{group_id}{imported.get('user_name', persona_id)}"
+
+        personalities = load_personalities()
+        existed = persona_id in personalities
+        personalities[persona_id] = imported
+        save_personalities(personalities)
+
+        status = "更新" if existed else "导入"
+        group_text = f"群 {group_id} " if group_id else ""
+        yield event.plain_result(
+            f"✅ 已{status}{group_text}人格「{persona_id}」到插件列表。\n"
+            f"现在可以使用「人格切换 {persona_id}」。"
+        )
+
+    # ════════════════════════════════════════════════════
+    # 7. 人格更新
+    # ════════════════════════════════════════════════════
+    @filter.command("人格更新")
+    async def update_personality(self, event: AstrMessageEvent):
+        self._remember_event(event)
+        text = self._strip_bot_mentions(event.message_str.strip())
+        parts = text.split()
+        event_group_id = self._get_event_group_id(event)
+
+        if event_group_id:
+            if len(parts) < 2:
+                yield event.plain_result("群聊用法：人格更新 <人格ID>")
+                return
+            group_id = str(event_group_id)
+            pid = parts[1].strip()
+        else:
+            if len(parts) < 3 or not parts[1].isdigit():
+                yield event.plain_result(
+                    "私聊用法：人格更新 <群号> <人格ID>\n"
+                    "例如：人格更新 477065120 cbaba"
+                )
+                return
+            group_id = str(int(parts[1]))
+            pid = parts[2].strip()
+
+        personalities = load_personalities()
+        data = personalities.get(pid)
+        if not data:
+            yield event.plain_result(f"❌ 未找到人格「{pid}」。")
+            return
+
+        saved_group_id = str(data.get("group_id", "")).strip()
+        if saved_group_id != group_id:
+            yield event.plain_result(
+                f"❌ 人格「{pid}」不属于群 {group_id}。\n"
+                f"当前记录所属群：{saved_group_id or '未知'}"
+            )
+            return
+
+        if not str(data.get("user_id", "")).strip():
+            yield event.plain_result(
+                f"❌ 人格「{pid}」缺少 QQ 号，无法抓取聊天记录更新。\n"
+                f"如果它是从 AstrBot 人格设定导入的，需要重新克隆一次补齐元数据。"
+            )
+            return
+
+        yield event.plain_result(f"😏 开始重新蒸馏「{pid}」，我看看你最近又进化成什么味了...")
+        updated = await self._refresh_personality(pid, data)
+        if not updated:
+            yield event.plain_result(f"❌ 人格「{pid}」更新失败，可能没有抓到新聊天记录。")
+            return
+
+        personalities = load_personalities()
+        personalities[pid] = updated
+        save_personalities(personalities)
+        yield event.plain_result(
+            f"✅ 人格「{pid}」已更新。\n"
+            f"分析消息数：{updated.get('message_count', 0)} 条"
+        )
+
+    # ════════════════════════════════════════════════════
+    # 8. 人格删除（管理员）
     # ════════════════════════════════════════════════════
     @filter.command("人格删除")
     async def delete_personality(self, event: AstrMessageEvent):
@@ -1586,6 +1743,8 @@ class ClonePersonalityPlugin(Star):
             "人格切换",
             "人格列表",
             "人格详情",
+            "人格导入",
+            "人格更新",
             "人格删除",
             "管理员注入开关",
         )
@@ -1836,6 +1995,77 @@ class ClonePersonalityPlugin(Star):
 
         return str(resp).strip()
 
+    async def _import_astrbot_persona(self, persona_id: str) -> Optional[Dict]:
+        if not hasattr(self.context, "persona_manager"):
+            return None
+
+        persona_mgr = self.context.persona_manager
+        try:
+            persona = await self._maybe_await(persona_mgr.get_persona(persona_id))
+        except Exception as e:
+            logger.warning(f"读取 AstrBot 人格失败 {persona_id}: {e}")
+            return None
+
+        if not persona:
+            return None
+
+        system_prompt = self._extract_persona_field(
+            persona,
+            "system_prompt",
+            "prompt",
+            "persona",
+            "content",
+        )
+        if not system_prompt:
+            system_prompt = str(persona)
+
+        name = (
+            self._extract_persona_field(persona, "name", "persona_id", "id")
+            or persona_id
+        )
+        imported_at = datetime.now().isoformat()
+        return {
+            "identity": "",
+            "summary": system_prompt,
+            "speaking_style": [],
+            "values_and_boundaries": [],
+            "trigger_reactions": [],
+            "common_phrases": [],
+            "signature_quotes": [],
+            "behavior_examples": [],
+            "avoidances": [],
+            "traits": {},
+            "interests": [],
+            "emotional_pattern": "",
+            "recent_changes": [],
+            "last_update_summary": "",
+            "user_id": persona_id,
+            "user_name": str(name),
+            "persona_name": str(name),
+            "group_id": "",
+            "created_at": imported_at,
+            "updated_at": imported_at,
+            "message_count": 0,
+            "imported_from": "astrbot_persona",
+            "raw_system_prompt": system_prompt,
+        }
+
+    def _extract_persona_field(self, persona: Any, *names: str) -> str:
+        for name in names:
+            value = None
+            if isinstance(persona, dict):
+                value = persona.get(name)
+            else:
+                value = getattr(persona, name, None)
+
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if value is not None and not isinstance(value, (dict, list, tuple)):
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
+
     async def _inject_to_astrbot_persona(self, event, personality: Dict,
                                           target_name: str) -> bool:
         """将人格注入 AstrBot 系统设定"""
@@ -1939,6 +2169,10 @@ class ClonePersonalityPlugin(Star):
         summary = personality.get("summary", "")
         if summary:
             lines.append(f"\n【人格摘要】\n{summary}")
+
+        raw_system_prompt = personality.get("raw_system_prompt", "")
+        if raw_system_prompt and raw_system_prompt != summary:
+            lines.append(f"\n【导入的 AstrBot 人格设定】\n{raw_system_prompt}")
 
         recent_changes = personality.get("recent_changes", [])
         if recent_changes:
