@@ -1096,11 +1096,6 @@ class ClonePersonalityPlugin(Star):
     # ════════════════════════════════════════════════════
     @filter.command("人格导入")
     async def import_personality(self, event: AstrMessageEvent):
-        is_admin = await self._is_admin(event)
-        if not is_admin:
-            yield event.plain_result("❌ 只有管理员可以导入人格。")
-            return
-
         text = self._strip_bot_mentions(event.message_str.strip())
         parts = text.split()
         event_group_id = self._get_event_group_id(event)
@@ -2256,22 +2251,54 @@ class ClonePersonalityPlugin(Star):
     async def _is_admin(self, event) -> bool:
         """判断当前用户是否为管理员"""
         try:
-            sender_id = event.get_sender_id()
+            sender_id = str(event.get_sender_id() or "").strip()
             if not sender_id:
                 return False
 
-            admin_ids = []
+            for attr in ("is_admin", "is_superuser", "is_admin_event"):
+                value = getattr(event, attr, None)
+                if isinstance(value, bool) and value:
+                    return True
+                if callable(value):
+                    try:
+                        result = await self._maybe_await(value())
+                        if bool(result):
+                            return True
+                    except Exception:
+                        pass
+
+            message_obj = getattr(event, "message_obj", None)
+            raw_message = getattr(message_obj, "raw_message", None)
+            sender = None
+            if isinstance(raw_message, dict):
+                sender = raw_message.get("sender")
+            if sender is None:
+                sender = getattr(message_obj, "sender", None)
+            role = ""
+            if isinstance(sender, dict):
+                role = str(sender.get("role") or sender.get("user_role") or "").lower()
+            elif sender is not None:
+                role = str(getattr(sender, "role", "") or getattr(sender, "user_role", "")).lower()
+            if role in ("owner", "admin", "administrator"):
+                return True
+
+            admin_ids = set()
 
             if hasattr(self, 'config') and hasattr(self.config, 'get'):
                 try:
                     admins = await self.config.get("admins")
                     if admins:
-                        admin_ids = admins if isinstance(admins, list) else [admins]
+                        admin_ids.update(self._extract_admin_ids(admins))
                 except Exception:
                     pass
 
+            for source in (self.plugin_cfg, load_config(), DEFAULT_CONFIG):
+                admin_ids.update(self._extract_admin_ids(source))
+
             config_paths = [
                 "/AstrBot/data/config.json",
+                "/AstrBot/data/cmd_config.json",
+                "/AstrBot/data/config/astrbot_config.json",
                 "/AstrBot/astrbot/config.json",
             ]
             for cp in config_paths:
@@ -2279,18 +2306,72 @@ class ClonePersonalityPlugin(Star):
                     try:
                         with open(cp, "r", encoding="utf-8") as f:
                             config = json.load(f)
-                        admins = config.get("admins", config.get("admin", []))
-                        if admins:
-                            if isinstance(admins, list):
-                                admin_ids.extend(admins)
-                            else:
-                                admin_ids.append(admins)
+                        admin_ids.update(self._extract_admin_ids(config))
                     except Exception:
                         pass
 
-            admin_ids = list(set(str(a) for a in admin_ids))
-            return str(sender_id) in admin_ids
+            normalized_admin_ids = {str(a).strip() for a in admin_ids if str(a).strip()}
+            is_admin = sender_id in normalized_admin_ids
+            if not is_admin:
+                logger.debug(
+                    f"管理员检查未命中: sender={sender_id}, admins={sorted(normalized_admin_ids)}"
+                )
+            return is_admin
 
         except Exception as e:
             logger.error(f"检查管理员权限失败: {e}")
             return False
+
+    def _extract_admin_ids(self, value: Any) -> set:
+        """从不同 AstrBot 配置结构里递归提取管理员 QQ。"""
+        admin_keys = {
+            "admin",
+            "admins",
+            "admin_id",
+            "admin_ids",
+            "admins_id",
+            "admin_user",
+            "admin_users",
+            "admin_list",
+            "admin_qq",
+            "admin_qqs",
+            "administrator",
+            "administrators",
+            "superuser",
+            "superusers",
+            "superuser_id",
+            "superuser_ids",
+            "owner",
+            "owners",
+            "owner_id",
+            "owner_ids",
+            "manager",
+            "managers",
+            "master",
+            "masters",
+        }
+
+        found = set()
+        if value is None:
+            return found
+        if isinstance(value, (str, int)):
+            text = str(value).strip()
+            if text.isdigit():
+                found.add(text)
+            else:
+                found.update(re.findall(r"\d{5,}", text))
+            return found
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                found.update(self._extract_admin_ids(item))
+            return found
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key).lower()
+                if key_text in admin_keys:
+                    found.update(self._extract_admin_ids(item))
+                elif isinstance(item, dict):
+                    found.update(self._extract_admin_ids(item))
+            return found
+
+        return found
