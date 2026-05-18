@@ -1070,12 +1070,6 @@ class ClonePersonalityPlugin(Star):
             f"{data.get('summary', '无')}",
         ]
 
-        traits = data.get("traits", {})
-        if traits:
-            lines.extend(["", "🎭 性格特征:"])
-            for k, v in traits.items():
-                lines.append(f"  • {k}: {v}")
-
         phrases = data.get("common_phrases", [])
         if phrases:
             lines.extend(["", "💬 常用表达:"])
@@ -1085,6 +1079,12 @@ class ClonePersonalityPlugin(Star):
         style = data.get("speaking_style", "")
         if style:
             lines.extend(["", "🎙️ 说话风格:", f"  {style}"])
+
+        interests = data.get("interests", [])
+        if interests:
+            lines.extend(["", "🎮 兴趣偏好:"])
+            for item in interests[:5]:
+                lines.append(f"  • {item}")
 
         lines.append("")
         lines.append("💡 使用「人格切换 %s」切换" % pid)
@@ -1532,52 +1532,48 @@ class ClonePersonalityPlugin(Star):
 要求：
 1. 严格基于提供的聊天记录进行分析
 2. 分析要具体、生动、有血有肉，像一份可直接放进机器人人格设定里的模板
-3. 不要泛泛而谈，要给出具体特征、触发条件、反应模式和边界
+3. 不要泛泛而谈，但也不要做百科档案；只保留会直接影响回复口吻的特征
 4. “骚话/爆点语录/行为范例”必须尽量摘原始聊天里的原话，不要为了好看自行编造
 5. 骚话/爆点语录宁缺毋滥：只有明显有梗、有攻击性、有反差、有抽象感、有口癖或有传播感的句子才收录；普通陈述、无趣吐槽、泛泛观点不要硬凑
 6. 如果原始聊天里没有足够爆点语录，signature_quotes 返回空数组 []，不要为了凑数量填普通句子
-7. 输出必须是完整的新版人格 JSON，不要只输出本次变化
+7. 游戏偏好、政治/社会议题倾向、消费观等只在聊天记录证据明显时写入 interests 或 values_and_boundaries；证据不足不要强行归类
+8. 输出必须是完整的新版人格 JSON，不要只输出本次变化
 
 请按以下 JSON 格式输出（不要包含其他内容，只输出 JSON）：
 {{
-    "identity": "你现在的身份是QQ用户“{target_name}”。用一段 150-260 字描述TA是谁、圈层、性别/年龄感（只能推测时要含蓄）、核心气质、社交位置和最鲜明的人格反差。",
-    "summary": "人格核心：一段 180-300 字的总述，描述其核心矛盾、价值取向、社交姿态、情绪底色和典型反应。",
+    "identity": "你现在的身份是QQ用户“{target_name}”。用一段 80-160 字描述TA是谁、圈层、核心气质、社交位置和最鲜明的人格反差。",
+    "summary": "人格核心：一段 120-220 字的总述，描述其核心矛盾、价值取向、社交姿态、情绪底色和典型反应。",
     "speaking_style": [
         "说话风格与习惯 1",
         "说话风格与习惯 2",
         "说话风格与习惯 3",
-        "说话风格与习惯 4",
-        "说话风格与习惯 5"
+        "说话风格与习惯 4"
+    ],
+    "interests": [
+        "兴趣偏好或常聊话题 1；可包含游戏、二游、技术、硬件、音乐、消费等，但必须有聊天证据",
+        "兴趣偏好或常聊话题 2"
     ],
     "values_and_boundaries": [
-        "价值倾向与社交边界 1",
-        "价值倾向与社交边界 2",
-        "价值倾向与社交边界 3",
-        "价值倾向与社交边界 4"
+        "价值判断 1；可包含公共议题/商业观/技术观/消费观，但不要强行贴政治光谱标签",
+        "价值判断 2",
+        "社交边界或雷区 1"
+    ],
+    "social_mode": [
+        "对熟人/陌生人的不同说话方式",
+        "接梗、反喷、装死、锐评、求助或带新人时的典型社交模式"
     ],
     "trigger_reactions": [
         "当遇到某类话题/情境时：会如何反应",
         "当遇到某类话题/情境时：会如何反应",
-        "当遇到某类话题/情境时：会如何反应",
-        "当遇到某类话题/情境时：会如何反应",
         "当遇到某类话题/情境时：会如何反应"
     ],
-    "common_phrases": ["常用口头禅或高频短语（最多10个）"],
+    "common_phrases": ["常用口头禅或高频短语（最多8个）"],
     "signature_quotes": ["从原始聊天记录中摘出的真正有记忆点的原话（0-6条，必须是原话，不要改写；没有足够爆点就返回空数组，不要硬凑）"],
-    "behavior_examples": [
-        "当某情境出现时，你会说：引用或贴近原话的行为范例",
-        "当某情境出现时，你会说：引用或贴近原话的行为范例",
-        "当某情境出现时，你会说：引用或贴近原话的行为范例"
-    ],
     "avoidances": [
         "禁止项 1",
         "禁止项 2",
-        "禁止项 3",
-        "禁止项 4"
+        "禁止项 3"
     ],
-    "traits": {{}},
-    "interests": ["从聊天中推断的兴趣爱好或话题偏好（最多8个）"],
-    "emotional_pattern": "情绪模式：描述其情绪表达、脆弱点、攻击性、玩梗节奏或亲密关系里的反差。",
     "recent_changes": ["定期更新时发现的近期变化（0-5条）；从零创建时返回空数组"],
     "last_update_summary": "定期更新摘要；从零创建时返回空字符串"
 }}
@@ -1639,14 +1635,12 @@ class ClonePersonalityPlugin(Star):
             "summary",
             "speaking_style",
             "values_and_boundaries",
+            "interests",
+            "social_mode",
             "trigger_reactions",
             "common_phrases",
             "signature_quotes",
-            "behavior_examples",
             "avoidances",
-            "traits",
-            "interests",
-            "emotional_pattern",
         )
         compact = {
             key: personality.get(key)
@@ -1662,14 +1656,12 @@ class ClonePersonalityPlugin(Star):
             "summary",
             "speaking_style",
             "values_and_boundaries",
+            "interests",
+            "social_mode",
             "trigger_reactions",
             "common_phrases",
             "signature_quotes",
-            "behavior_examples",
             "avoidances",
-            "traits",
-            "interests",
-            "emotional_pattern",
         )
         for key in stable_fields:
             if new.get(key) in (None, "", [], {}) and old.get(key) not in (None, "", [], {}):
@@ -1833,8 +1825,18 @@ class ClonePersonalityPlugin(Star):
         )
         self._append_numbered_section(
             lines,
-            "价值倾向与社交边界",
+            "兴趣偏好",
+            personality.get("interests", []),
+        )
+        self._append_numbered_section(
+            lines,
+            "价值判断与社交边界",
             personality.get("values_and_boundaries", []),
+        )
+        self._append_numbered_section(
+            lines,
+            "社交模式",
+            personality.get("social_mode", []),
         )
         self._append_numbered_section(
             lines,
@@ -1852,11 +1854,6 @@ class ClonePersonalityPlugin(Star):
             lines.extend(["", "骚话 / 爆点语录"])
             lines.extend([f"- {quote}" for quote in quotes])
 
-        self._append_numbered_section(
-            lines,
-            "行为范例",
-            personality.get("behavior_examples", []),
-        )
         self._append_numbered_section(
             lines,
             "禁止项",
@@ -1954,15 +1951,13 @@ class ClonePersonalityPlugin(Star):
         return {
             "summary": text[:200] if text else "分析失败",
             "identity": "",
-            "traits": {},
             "speaking_style": "",
             "common_phrases": [],
             "signature_quotes": [],
             "values_and_boundaries": [],
-            "trigger_reactions": [],
-            "behavior_examples": [],
             "interests": [],
-            "emotional_pattern": "",
+            "social_mode": [],
+            "trigger_reactions": [],
             "recent_changes": [],
             "last_update_summary": "",
             "reply_rules": [],
@@ -1970,6 +1965,22 @@ class ClonePersonalityPlugin(Star):
         }
 
     def _normalize_personality(self, data: Dict) -> Dict:
+        for key in (
+            "speaking_style",
+            "values_and_boundaries",
+            "interests",
+            "social_mode",
+            "trigger_reactions",
+            "common_phrases",
+            "avoidances",
+        ):
+            value = data.get(key, [])
+            if isinstance(value, str):
+                value = [value] if value.strip() else []
+            if not isinstance(value, list):
+                value = []
+            data[key] = [str(item).strip() for item in value if str(item).strip()]
+
         data["signature_quotes"] = self._filter_signature_quotes(
             data.get("signature_quotes", [])
         )
@@ -2076,14 +2087,12 @@ class ClonePersonalityPlugin(Star):
             "summary": system_prompt,
             "speaking_style": [],
             "values_and_boundaries": [],
+            "interests": [],
+            "social_mode": [],
             "trigger_reactions": [],
             "common_phrases": [],
             "signature_quotes": [],
-            "behavior_examples": [],
             "avoidances": [],
-            "traits": {},
-            "interests": [],
-            "emotional_pattern": "",
             "recent_changes": [],
             "last_update_summary": "",
             "user_id": persona_id,
@@ -2231,12 +2240,6 @@ class ClonePersonalityPlugin(Star):
         if identity:
             lines.append(f"\n【身份设定】\n{identity}")
 
-        traits = personality.get("traits", {})
-        if traits:
-            lines.append("\n【性格特征】")
-            for k, v in traits.items():
-                lines.append(f"- {k}：{v}")
-
         style = personality.get("speaking_style", "")
         if style:
             lines.append("\n【说话风格与习惯】")
@@ -2246,10 +2249,22 @@ class ClonePersonalityPlugin(Star):
             else:
                 lines.append(str(style))
 
+        interests = personality.get("interests", [])
+        if interests:
+            lines.append("\n【兴趣偏好】")
+            for item in interests:
+                lines.append(f"- {item}")
+
         values = personality.get("values_and_boundaries", [])
         if values:
-            lines.append("\n【价值倾向与社交边界】")
+            lines.append("\n【价值判断与社交边界】")
             for idx, item in enumerate(values, 1):
+                lines.append(f"{idx}. {item}")
+
+        social_mode = personality.get("social_mode", [])
+        if social_mode:
+            lines.append("\n【社交模式】")
+            for idx, item in enumerate(social_mode, 1):
                 lines.append(f"{idx}. {item}")
 
         triggers = personality.get("trigger_reactions", [])
@@ -2267,22 +2282,6 @@ class ClonePersonalityPlugin(Star):
             lines.append("\n【骚话 / 爆点语录】")
             for item in quotes:
                 lines.append(f"- {item}")
-
-        examples = personality.get("behavior_examples", [])
-        if examples:
-            lines.append("\n【行为范例】")
-            for idx, item in enumerate(examples, 1):
-                lines.append(f"{idx}. {item}")
-
-        interests = personality.get("interests", [])
-        if interests:
-            lines.append("\n【关注话题】")
-            for item in interests:
-                lines.append(f"- {item}")
-
-        pattern = personality.get("emotional_pattern", "")
-        if pattern:
-            lines.append(f"\n【情绪模式】\n{pattern}")
 
         rules = personality.get("reply_rules", [])
         if rules:
