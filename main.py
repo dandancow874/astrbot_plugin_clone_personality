@@ -628,7 +628,7 @@ class ClonePersonalityPlugin(Star):
         私聊用法：克隆 <群号> <群友QQ/@群友/群名片或昵称>
         """
         self._remember_event(event)
-        text = event.message_str.strip()
+        text = self._strip_bot_mentions(event.message_str.strip())
         parts = text.split()
         force_refresh = "-f" in parts or "--force" in parts
 
@@ -883,7 +883,7 @@ class ClonePersonalityPlugin(Star):
             yield event.plain_result("❌ 只有管理员可以设置此选项。")
             return
 
-        text = event.message_str.strip()
+        text = self._strip_bot_mentions(event.message_str.strip())
         parts = text.split(maxsplit=1)
         arg = parts[1].strip().lower() if len(parts) > 1 else "toggle"
 
@@ -1040,7 +1040,7 @@ class ClonePersonalityPlugin(Star):
     # ════════════════════════════════════════════════════
     @filter.command("人格详情")
     async def personality_detail(self, event: AstrMessageEvent):
-        text = event.message_str.strip()
+        text = self._strip_bot_mentions(event.message_str.strip())
         parts = text.split(maxsplit=1)
 
         if len(parts) < 2:
@@ -1237,7 +1237,7 @@ class ClonePersonalityPlugin(Star):
             yield event.plain_result("❌ 只有管理员可以删除人格。")
             return
 
-        text = event.message_str.strip()
+        text = self._strip_bot_mentions(event.message_str.strip())
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
             yield event.plain_result("用法：人格删除 <人格ID>")
@@ -1772,7 +1772,10 @@ class ClonePersonalityPlugin(Star):
             yield event.plain_result(reply)
 
     def _strip_bot_mentions(self, text: str) -> str:
-        return re.sub(r"\[At:\d+\]", "", text).strip()
+        text = str(text or "")
+        text = re.sub(r"\[At:\d+\]", "", text)
+        text = re.sub(r"\[MSG_ID:\d+\]", "", text)
+        return text.strip()
 
     def _is_plugin_command_text(self, text: str) -> bool:
         text = self._strip_bot_mentions(str(text or "")).strip()
