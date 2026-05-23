@@ -104,6 +104,10 @@ DEFAULT_CONFIG = {
             "直接接话，少铺垫，少闭环，像活人。"
         ),
     },
+    "bypass": {
+        "skip_image_tasks": True,
+        "skip_tool_tasks": True,
+    },
 }
 
 
@@ -598,6 +602,9 @@ class ClonePersonalityPlugin(Star):
         self._remember_event(event)
         persona_id = self._get_session_active_persona(event)
         if not persona_id:
+            return
+        if self._should_skip_persona_for_task(event):
+            logger.info(f"人格注入跳过工具/图片任务: {self._get_session_keys(event)}")
             return
         logger.info(f"主动人格会话命中: {self._get_session_keys(event)} -> {persona_id}")
 
@@ -1745,6 +1752,9 @@ class ClonePersonalityPlugin(Star):
         persona_id = self._get_session_active_persona(event)
         if not persona_id:
             return
+        if self._should_skip_persona_for_task(event):
+            logger.info(f"人格主动回复跳过工具/图片任务: {self._get_session_keys(event)}")
+            return
         logger.info(f"LLM 请求人格会话命中: {self._get_session_keys(event)} -> {persona_id}")
 
         personalities = load_personalities()
@@ -1776,6 +1786,74 @@ class ClonePersonalityPlugin(Star):
         text = re.sub(r"\[At:\d+\]", "", text)
         text = re.sub(r"\[MSG_ID:\d+\]", "", text)
         return text.strip()
+
+    def _should_skip_persona_for_task(self, event: AstrMessageEvent) -> bool:
+        text = self._strip_bot_mentions(getattr(event, "message_str", "")).lower()
+
+        if bool(self._get_setting("bypass.skip_image_tasks", True)):
+            if self._event_has_image(event) and self._is_image_task_text(text):
+                return True
+
+        if bool(self._get_setting("bypass.skip_tool_tasks", True)):
+            if self._is_tool_task_text(text):
+                return True
+
+        return False
+
+    def _event_has_image(self, event: AstrMessageEvent) -> bool:
+        message_obj = getattr(event, "message_obj", None)
+        message_chain = getattr(message_obj, "message", []) or []
+        raw_message = getattr(message_obj, "raw_message", None)
+
+        candidates = list(message_chain)
+        if isinstance(raw_message, dict):
+            raw = raw_message.get("message", [])
+            if isinstance(raw, list):
+                candidates.extend(raw)
+            elif raw:
+                candidates.append(raw)
+        elif isinstance(raw_message, list):
+            candidates.extend(raw_message)
+
+        for comp in candidates:
+            if isinstance(comp, dict):
+                comp_type = str(comp.get("type", "")).lower()
+                if comp_type in ("image", "mface", "face"):
+                    return True
+                data = comp.get("data", {})
+                if isinstance(data, dict) and any(k in data for k in ("url", "file", "image")):
+                    if comp_type in ("image", "mface") or "image" in str(data).lower():
+                        return True
+                continue
+
+            comp_type = type(comp).__name__.lower()
+            if "image" in comp_type:
+                return True
+            if any(hasattr(comp, attr) for attr in ("url", "file", "image")) and "plain" not in comp_type:
+                rep = repr(comp).lower()
+                if "image" in rep or "图片" in rep:
+                    return True
+
+        text = str(getattr(event, "message_str", "") or "")
+        return "[图片]" in text or "[image" in text.lower()
+
+    def _is_image_task_text(self, text: str) -> bool:
+        patterns = (
+            r"(参考|照着|按这张|用这张|把这张|这张图|这个图|原图)",
+            r"(转成|变成|改成|生成|画|绘制|重绘|修图|改图|图生图|换风格|真人|照片|写实|二次元|扩图|抠图|去水印)",
+            r"(image|photo|realistic|img2img|edit image)",
+        )
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+    def _is_tool_task_text(self, text: str) -> bool:
+        tool_patterns = (
+            r"(画图|生成图|生成图片|出图|图生图|改图|修图|重绘|换风格|转真人|真人照片)",
+            r"(识图|看图|图片分析|ocr|提取文字)",
+            r"(搜索|搜一下|查一下|查资料|联网|浏览网页|打开网页)",
+            r"(运行命令|执行命令|跑命令|读文件|读取文件|打开文件|处理文件)",
+            r"(skill|插件|工具调用|调用工具)",
+        )
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in tool_patterns)
 
     def _is_plugin_command_text(self, text: str) -> bool:
         text = self._strip_bot_mentions(str(text or "")).strip()

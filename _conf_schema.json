@@ -137,6 +137,24 @@
       }
     }
   },
+  "bypass": {
+    "description": "任务绕过",
+    "type": "object",
+    "items": {
+      "skip_image_tasks": {
+        "description": "图片任务跳过人格",
+        "type": "bool",
+        "hint": "开启后，消息包含图片且文本像画图、改图、图生图、转真人照片等任务时，不注入人格，也不由人格插件主动回复，交给画图/识图 skill 处理。",
+        "default": true
+      },
+      "skip_tool_tasks": {
+        "description": "工具/技能任务跳过人格",
+        "type": "bool",
+        "hint": "开启后，搜索、识图、OCR、画图、文件处理、命令执行等明显工具任务会跳过人格，避免人格插件抢走其他插件或 skill 的处理链路。",
+        "default": true
+      }
+    }
+  },
   "auto_update": {
     "description": "定期更新",
     "type": "object",

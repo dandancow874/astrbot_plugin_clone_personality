@@ -129,6 +129,8 @@ AstrBot 群友人格克隆插件。插件会读取目标群友的群聊历史，
 | `message.max_prompt_chars` | 送入模型的聊天记录总字符预算 |
 | `admin_only_inject` | 打开后仅管理员克隆时会创建/更新 AstrBot 人格 |
 | `persona.system_prompt_prefix` | 创建/更新人格时拼在人格设定最前面的 System Prompt |
+| `bypass.skip_image_tasks` | 图片任务跳过人格；包含图片且像画图、改图、图生图、转真人照片时，交给画图/识图 skill |
+| `bypass.skip_tool_tasks` | 工具/技能任务跳过人格；搜索、识图、OCR、画图、文件处理等明显工具任务不由人格接管 |
 | `auto_update.enabled` | 是否启用自动更新 |
 | `auto_update.check_weekday` | 每周几检查；`0` 每天，`1` 周一，`7` 周日 |
 | `auto_update.check_hour` | 几点检查；`0-23` |
