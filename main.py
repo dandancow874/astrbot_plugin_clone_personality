@@ -1940,6 +1940,8 @@ class ClonePersonalityPlugin(Star):
             if not msg:
                 continue
             msg = re.sub(r"https?://\S+", "[链接]", msg)
+            msg = re.sub(r"\[CQ:(image|record|video|mface|face|json|xml),[^\]]+\]", "[非文本消息]", msg, flags=re.IGNORECASE)
+            msg = re.sub(r"base64://[A-Za-z0-9+/=]+", "[base64]", msg)
             if len(msg) > max_msg_chars:
                 msg = msg[:max_msg_chars] + "..."
             projected = used_chars + len(msg) + 3
@@ -1951,22 +1953,8 @@ class ClonePersonalityPlugin(Star):
         return prepared
 
     async def _call_llm(self, event, prompt: str):
-        """优先使用 WebUI 指定 provider，缺失时回退当前会话/默认 LLM。"""
+        """优先使用纯净 provider 调用，避免分析请求带入会话上下文。"""
         provider_id = str(self._get_setting("llm.provider_id", "") or "").strip()
-
-        if hasattr(self.context, "llm_generate"):
-            chat_provider_id = provider_id or None
-            if not chat_provider_id and hasattr(self.context, "get_current_chat_provider_id"):
-                try:
-                    chat_provider_id = await self.context.get_current_chat_provider_id(
-                        event.unified_msg_origin
-                    )
-                except Exception:
-                    chat_provider_id = None
-            return await self.context.llm_generate(
-                chat_provider_id=chat_provider_id,
-                prompt=prompt,
-            )
 
         provider = None
         if provider_id and hasattr(self.context, "get_provider_by_id"):
@@ -1986,6 +1974,20 @@ class ClonePersonalityPlugin(Star):
                 )
             except TypeError:
                 return await provider.text_chat(prompt)
+
+        if hasattr(self.context, "llm_generate"):
+            chat_provider_id = provider_id or None
+            if not chat_provider_id and hasattr(self.context, "get_current_chat_provider_id"):
+                try:
+                    chat_provider_id = await self.context.get_current_chat_provider_id(
+                        event.unified_msg_origin
+                    )
+                except Exception:
+                    chat_provider_id = None
+            return await self.context.llm_generate(
+                chat_provider_id=chat_provider_id,
+                prompt=prompt,
+            )
 
         if hasattr(self, 'llm') and self.llm:
             return await self.llm.text_chat(prompt)
