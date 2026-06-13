@@ -385,6 +385,7 @@ class ClonePersonalityPlugin(Star):
             personality["update_mode"] = "incremental"
             personality["message_count"] = len(messages)
             personality = self._normalize_personality_metadata(pid, personality, group_id)
+            personality = self._refresh_runtime_profile(personality)
 
             personalities = load_personalities()
             canonical_id = personality.get("persona_id", pid)
@@ -674,6 +675,7 @@ class ClonePersonalityPlugin(Star):
             ("人格详情", self.personality_detail),
             ("人格导入", self.import_personality),
             ("人格更新", self.update_personality),
+            ("人格纠正", self.correct_personality),
             ("人格删除", self.delete_personality),
         )
         for command_name, handler in handlers:
@@ -933,6 +935,7 @@ class ClonePersonalityPlugin(Star):
         personality["update_mode"] = "incremental" if incremental_update else "full"
         personality["message_count"] = len(messages)
         personality = self._normalize_personality_metadata(pid, personality, group_id)
+        personality = self._refresh_runtime_profile(personality)
 
         if existing_pid != pid:
             personalities.pop(existing_pid, None)
@@ -1206,6 +1209,20 @@ class ClonePersonalityPlugin(Star):
             for item in interests[:5]:
                 lines.append(f"  • {item}")
 
+        aliases = data.get("aliases", [])
+        if aliases:
+            lines.extend(["", "🏷️ 群内别称:"])
+            for item in aliases[:8]:
+                if isinstance(item, dict) and item.get("name"):
+                    lines.append(f"  • {item.get('name')}")
+
+        corrections = data.get("corrections", [])
+        if corrections:
+            lines.extend(["", "🛠️ 人工纠正:"])
+            for item in corrections[-5:]:
+                if isinstance(item, dict) and item.get("text"):
+                    lines.append(f"  • {item.get('text')}")
+
         lines.append("")
         lines.append("💡 使用「人格切换 %s」切换" % pid)
 
@@ -1269,6 +1286,7 @@ class ClonePersonalityPlugin(Star):
             imported.get("user_id", persona_id),
         )
         imported = self._normalize_personality_metadata(canonical_id, imported, group_id)
+        imported = self._refresh_runtime_profile(imported)
         existed = canonical_id in personalities or bool(existing_pid)
         if existing_pid and existing_pid != canonical_id:
             personalities.pop(existing_pid, None)
@@ -1363,7 +1381,54 @@ class ClonePersonalityPlugin(Star):
         )
 
     # ════════════════════════════════════════════════════
-    # 8. 人格删除（管理员）
+    # 8. 人格纠正
+    # ════════════════════════════════════════════════════
+    @filter.command("人格纠正")
+    async def correct_personality(self, event: AstrMessageEvent):
+        text = self._strip_bot_mentions(event.message_str.strip())
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            yield event.plain_result("用法：人格纠正 <人格ID/昵称> <纠正内容>")
+            return
+
+        arg = parts[1].strip()
+        correction_text = parts[2].strip()
+        if not correction_text:
+            yield event.plain_result("纠正内容不能为空。")
+            return
+
+        personalities = load_personalities()
+        pid = self._resolve_personality_id(
+            personalities,
+            arg,
+            self._get_event_group_id(event),
+        )
+        if not pid:
+            yield event.plain_result(f"❌ 未找到人格「{arg}」。")
+            return
+
+        data = self._normalize_personality_metadata(pid, personalities[pid])
+        corrections = data.get("corrections", [])
+        if not isinstance(corrections, list):
+            corrections = []
+        corrections.append({
+            "text": correction_text,
+            "created_at": datetime.now().isoformat(),
+            "source": "manual",
+        })
+        data["corrections"] = corrections[-20:]
+        data = self._refresh_runtime_profile(data)
+        personalities[pid] = data
+        save_personalities(personalities)
+
+        await self._inject_to_astrbot_persona(event, data, data.get("user_name", pid))
+        yield event.plain_result(
+            f"✅ 已记录人格纠正：{pid}\n"
+            f"{correction_text}"
+        )
+
+    # ════════════════════════════════════════════════════
+    # 9. 人格删除（管理员）
     # ════════════════════════════════════════════════════
     @filter.command("人格删除")
     async def delete_personality(self, event: AstrMessageEvent):
@@ -1472,6 +1537,7 @@ class ClonePersonalityPlugin(Star):
         max_count = max_messages or self._get_analysis_message_limit("initial")
 
         texts = []
+        alias_hints = []
         message_seq = 0
         bot_id = self._get_bot_self_id(event)
         for _ in range(max_rounds):
@@ -1507,11 +1573,14 @@ class ClonePersonalityPlugin(Star):
                     texts.append(text)
                     if len(texts) >= max_count:
                         break
+                elif self._is_target_alias_hint(item, text, user_id, target_name):
+                    alias_hints.append(f"群友提到 {target_name}：{text}")
 
             if len(texts) >= max_count:
                 break
 
-        return {"messages": texts[:max_count]}
+        hint_limit = min(30, max(5, max_count // 10))
+        return {"messages": (alias_hints[:hint_limit] + texts)[:max_count]}
 
     def _extract_plain_text_from_raw_message(self, item: Dict[str, Any]) -> str:
         raw_message = item.get("message", "")
@@ -1531,6 +1600,42 @@ class ClonePersonalityPlugin(Star):
             if text:
                 parts.append(str(text))
         return "".join(parts).strip()
+
+    def _is_target_alias_hint(self, item: Dict[str, Any], text: str,
+                              user_id: Any, target_name: str) -> bool:
+        text = str(text or "").strip()
+        if not text:
+            return False
+        user_text = str(user_id or "").strip()
+        target = str(target_name or "").strip()
+        mentions_target = False
+        if user_text and user_text in text:
+            mentions_target = True
+        if target and target in text:
+            mentions_target = True
+
+        raw_message = item.get("message", "") if isinstance(item, dict) else ""
+        if isinstance(raw_message, list):
+            for seg in raw_message:
+                if not isinstance(seg, dict):
+                    continue
+                if seg.get("type") != "at":
+                    continue
+                data = seg.get("data", {})
+                qq = data.get("qq") if isinstance(data, dict) else None
+                if str(qq or "") == user_text:
+                    mentions_target = True
+                    break
+
+        if not mentions_target:
+            return False
+
+        alias_patterns = (
+            r"(也就是|又叫|外号|别称|叫他|叫她|叫你|称呼)",
+            r"(是.+?(他爸|她爸|爹|妈|哥|姐|儿子|女儿|老婆|老公))",
+            r"(以后.*叫|就叫|可以叫)",
+        )
+        return any(re.search(pattern, text) for pattern in alias_patterns)
 
     async def _resolve_group_member_id(self, event, group_id: int,
                                        name: str) -> Optional[str]:
@@ -1679,6 +1784,8 @@ class ClonePersonalityPlugin(Star):
 6. 如果原始聊天里没有足够爆点语录，signature_quotes 返回空数组 []，不要为了凑数量填普通句子
 7. 游戏偏好、政治/社会议题倾向、消费观等只在聊天记录证据明显时写入 interests 或 values_and_boundaries；证据不足不要强行归类
 8. 输出必须是完整的新版人格 JSON，不要只输出本次变化
+9. 如果聊天记录里出现“也就是/又叫/外号/叫他/是某某他爸”等称呼、玩梗关系，请写入 aliases 或 relations；必须标注为群聊称呼/玩梗关系，不要当真实身份事实
+10. reply_rules 只写可直接控制回复的短规则，不要写抽象评价
 
 请按以下 JSON 格式输出（不要包含其他内容，只输出 JSON）：
 {{
@@ -1710,6 +1817,16 @@ class ClonePersonalityPlugin(Star):
     ],
     "common_phrases": ["常用口头禅或高频短语（最多8个）"],
     "signature_quotes": ["从原始聊天记录中摘出的真正有记忆点的原话（0-6条，必须是原话，不要改写；没有足够爆点就返回空数组，不要硬凑）"],
+    "aliases": [
+        {{"name": "群里叫TA的别称或外号", "type": "nickname/relation_nickname", "confidence": "high/medium/low", "evidence": "对应原话或空字符串"}}
+    ],
+    "relations": [
+        {{"target": "对方称呼", "relation": "群聊关系称呼", "meaning": "群友玩梗关系，不一定是真实亲属/现实关系", "confidence": "high/medium/low"}}
+    ],
+    "reply_rules": [
+        "运行时必须遵守的具体短规则 1",
+        "运行时必须遵守的具体短规则 2"
+    ],
     "avoidances": [
         "禁止项 1",
         "禁止项 2",
@@ -1999,6 +2116,7 @@ class ClonePersonalityPlugin(Star):
             "人格详情",
             "人格导入",
             "人格更新",
+            "人格纠正",
             "人格删除",
             "管理员注入开关",
         )
@@ -2058,6 +2176,44 @@ class ClonePersonalityPlugin(Star):
             "触发条件与反应模式",
             personality.get("trigger_reactions", []),
         )
+
+        aliases = personality.get("aliases", [])
+        if aliases:
+            lines.extend(["", "群内别称 / 外号"])
+            for item in aliases:
+                if isinstance(item, dict):
+                    name = item.get("name", "")
+                    confidence = item.get("confidence", "")
+                    if name:
+                        suffix = f"（{confidence}）" if confidence else ""
+                        lines.append(f"- {name}{suffix}")
+
+        relations = personality.get("relations", [])
+        if relations:
+            lines.extend(["", "群内关系称呼"])
+            for item in relations:
+                if isinstance(item, dict):
+                    target = item.get("target", "")
+                    relation = item.get("relation", "")
+                    meaning = item.get("meaning", "")
+                    text = f"{target}：{relation}" if target else relation
+                    if meaning:
+                        text += f"；{meaning}"
+                    if text.strip():
+                        lines.append(f"- {text}")
+
+        self._append_numbered_section(
+            lines,
+            "运行时回复规则",
+            personality.get("reply_rules", []),
+        )
+
+        corrections = personality.get("corrections", [])
+        if corrections:
+            lines.extend(["", "人工纠正"])
+            for item in corrections[-5:]:
+                if isinstance(item, dict) and item.get("text"):
+                    lines.append(f"- {item.get('text')}")
 
         phrases = personality.get("common_phrases", [])
         if phrases:
@@ -2177,6 +2333,9 @@ class ClonePersonalityPlugin(Star):
             "last_update_summary": "",
             "reply_rules": [],
             "avoidances": [],
+            "aliases": [],
+            "relations": [],
+            "corrections": [],
         }
 
     def _normalize_personality(self, data: Dict) -> Dict:
@@ -2188,6 +2347,7 @@ class ClonePersonalityPlugin(Star):
             "trigger_reactions",
             "common_phrases",
             "avoidances",
+            "reply_rules",
         ):
             value = data.get(key, [])
             if isinstance(value, str):
@@ -2195,6 +2355,19 @@ class ClonePersonalityPlugin(Star):
             if not isinstance(value, list):
                 value = []
             data[key] = [str(item).strip() for item in value if str(item).strip()]
+
+        data["aliases"] = self._normalize_aliases(data.get("aliases", []))
+        data["relations"] = self._normalize_relations(data.get("relations", []))
+        corrections = data.get("corrections", [])
+        if isinstance(corrections, str):
+            corrections = [{"text": corrections}]
+        if not isinstance(corrections, list):
+            corrections = []
+        data["corrections"] = [
+            item if isinstance(item, dict) else {"text": str(item)}
+            for item in corrections
+            if str(item.get("text", "") if isinstance(item, dict) else item).strip()
+        ][-20:]
 
         data["signature_quotes"] = self._filter_signature_quotes(
             data.get("signature_quotes", [])
@@ -2212,6 +2385,120 @@ class ClonePersonalityPlugin(Star):
         data["last_update_summary"] = str(
             data.get("last_update_summary", "") or ""
         ).strip()
+        data = self._refresh_runtime_profile(data)
+        return data
+
+    def _normalize_aliases(self, aliases: Any) -> List[Dict[str, str]]:
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not isinstance(aliases, list):
+            return []
+        normalized = []
+        seen = set()
+        for item in aliases:
+            if isinstance(item, dict):
+                name = str(item.get("name", "") or item.get("alias", "")).strip()
+                alias_type = str(item.get("type", "nickname") or "nickname").strip()
+                evidence = str(item.get("evidence", "") or "").strip()
+                confidence = str(item.get("confidence", "medium") or "medium").strip()
+            else:
+                name = str(item).strip()
+                alias_type = "nickname"
+                evidence = ""
+                confidence = "medium"
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            normalized.append({
+                "name": name,
+                "type": alias_type,
+                "confidence": confidence,
+                "evidence": evidence,
+            })
+        return normalized[:12]
+
+    def _normalize_relations(self, relations: Any) -> List[Dict[str, str]]:
+        if isinstance(relations, str):
+            relations = [relations]
+        if not isinstance(relations, list):
+            return []
+        normalized = []
+        for item in relations:
+            if isinstance(item, dict):
+                target = str(item.get("target", "") or "").strip()
+                relation = str(item.get("relation", "") or item.get("name", "")).strip()
+                meaning = str(item.get("meaning", "") or "").strip()
+                confidence = str(item.get("confidence", "medium") or "medium").strip()
+            else:
+                text = str(item).strip()
+                target = ""
+                relation = text
+                meaning = "群聊语境关系"
+                confidence = "medium"
+            if relation:
+                normalized.append({
+                    "target": target,
+                    "relation": relation,
+                    "meaning": meaning,
+                    "confidence": confidence,
+                })
+        return normalized[:12]
+
+    def _refresh_runtime_profile(self, data: Dict) -> Dict:
+        full_profile = {
+            "summary": data.get("summary", ""),
+            "identity": data.get("identity", ""),
+            "speaking_style": data.get("speaking_style", []),
+            "interests": data.get("interests", []),
+            "values_and_boundaries": data.get("values_and_boundaries", []),
+            "social_mode": data.get("social_mode", []),
+            "trigger_reactions": data.get("trigger_reactions", []),
+            "common_phrases": data.get("common_phrases", []),
+            "signature_quotes": data.get("signature_quotes", []),
+            "avoidances": data.get("avoidances", []),
+            "recent_changes": data.get("recent_changes", []),
+        }
+        data["full_profile"] = full_profile
+
+        rules = []
+        rules.extend(data.get("reply_rules", [])[:4])
+        rules.extend(data.get("speaking_style", [])[:4])
+        rules.extend(data.get("social_mode", [])[:3])
+        rules.extend(data.get("trigger_reactions", [])[:3])
+        rules = [re.sub(r"\s+", " ", str(item)).strip() for item in rules]
+        rules = [item for item in rules if item][:10]
+
+        corrections = [
+            str(item.get("text", "")).strip()
+            for item in data.get("corrections", [])
+            if isinstance(item, dict) and str(item.get("text", "")).strip()
+        ]
+        aliases = [
+            str(item.get("name", "")).strip()
+            for item in data.get("aliases", [])
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        ]
+        phrases = [str(item).strip() for item in data.get("common_phrases", []) if str(item).strip()]
+        avoidances = [str(item).strip() for item in data.get("avoidances", []) if str(item).strip()]
+
+        prompt_lines = []
+        if aliases:
+            prompt_lines.append(f"群里也可能用这些称呼叫你：{'、'.join(aliases[:6])}。")
+        if corrections:
+            prompt_lines.append("人工纠正优先遵守：" + "；".join(corrections[-5:]))
+        if rules:
+            prompt_lines.append("该群友的核心说话规则：" + "；".join(rules[:8]))
+        if phrases:
+            prompt_lines.append(f"可自然使用的高频表达：{'、'.join(phrases[:8])}。")
+        if avoidances:
+            prompt_lines.append("避免：" + "；".join(avoidances[:6]))
+
+        data["runtime"] = {
+            "layer0_rules": rules,
+            "runtime_prompt": "\n".join(prompt_lines),
+            "corrections": data.get("corrections", []),
+            "hard_avoidances": avoidances,
+        }
         return data
 
     def _filter_signature_quotes(self, quotes: Any) -> List[str]:
@@ -2431,84 +2718,36 @@ class ClonePersonalityPlugin(Star):
             return False
 
     def _build_persona_text(self, personality: Dict, target_name: str) -> str:
+        personality = self._refresh_runtime_profile(personality)
         prefix = str(self._get_setting("persona.system_prompt_prefix", "") or "").strip()
         lines = []
         if prefix:
             lines.append(prefix)
         lines.append(f"\n你现在就按 {target_name} 的群聊口吻说话。")
 
-        summary = personality.get("summary", "")
-        if summary:
-            lines.append(f"\n【人格摘要】\n{summary}")
-
         raw_system_prompt = personality.get("raw_system_prompt", "")
-        if raw_system_prompt and raw_system_prompt != summary:
+        if raw_system_prompt and not personality.get("runtime", {}).get("runtime_prompt"):
             lines.append(f"\n【导入的 AstrBot 人格设定】\n{raw_system_prompt}")
 
-        recent_changes = personality.get("recent_changes", [])
-        if recent_changes:
-            lines.append("\n【近期变化】")
-            for item in recent_changes:
-                lines.append(f"- {item}")
-
-        identity = personality.get("identity", "")
-        if identity:
-            lines.append(f"\n【身份设定】\n{identity}")
-
-        style = personality.get("speaking_style", "")
-        if style:
-            lines.append("\n【说话风格与习惯】")
-            if isinstance(style, list):
-                for idx, item in enumerate(style, 1):
+        runtime_prompt = str(
+            personality.get("runtime", {}).get("runtime_prompt", "") or ""
+        ).strip()
+        if runtime_prompt:
+            lines.append(f"\n【该群友运行时规则】\n{runtime_prompt}")
+        else:
+            summary = personality.get("summary", "")
+            if summary:
+                lines.append(f"\n【人格摘要】\n{summary}")
+            style = personality.get("speaking_style", [])
+            if style:
+                lines.append("\n【说话风格与习惯】")
+                for idx, item in enumerate(style[:6], 1):
                     lines.append(f"{idx}. {item}")
-            else:
-                lines.append(str(style))
-
-        interests = personality.get("interests", [])
-        if interests:
-            lines.append("\n【兴趣偏好】")
-            for item in interests:
-                lines.append(f"- {item}")
-
-        values = personality.get("values_and_boundaries", [])
-        if values:
-            lines.append("\n【价值判断与社交边界】")
-            for idx, item in enumerate(values, 1):
-                lines.append(f"{idx}. {item}")
-
-        social_mode = personality.get("social_mode", [])
-        if social_mode:
-            lines.append("\n【社交模式】")
-            for idx, item in enumerate(social_mode, 1):
-                lines.append(f"{idx}. {item}")
-
-        triggers = personality.get("trigger_reactions", [])
-        if triggers:
-            lines.append("\n【触发条件与反应模式】")
-            for idx, item in enumerate(triggers, 1):
-                lines.append(f"{idx}. {item}")
-
-        phrases = personality.get("common_phrases", [])
-        if phrases:
-            lines.append(f"\n【常用表达】\n{' '.join(phrases)}")
-
-        quotes = personality.get("signature_quotes", [])
-        if quotes:
-            lines.append("\n【骚话 / 爆点语录】")
-            for item in quotes:
-                lines.append(f"- {item}")
-
-        rules = personality.get("reply_rules", [])
-        if rules:
-            lines.append("\n【回复规则】")
-            for item in rules:
-                lines.append(f"- {item}")
-
-        avoidances = personality.get("avoidances", [])
-        if avoidances:
-            lines.append("\n【避免事项】")
-            for item in avoidances:
-                lines.append(f"- {item}")
+            avoidances = personality.get("avoidances", [])
+            if avoidances:
+                lines.append("\n【避免事项】")
+                for item in avoidances[:6]:
+                    lines.append(f"- {item}")
 
         lines.append("\n请在所有回复中保持该角色的稳定风格、措辞习惯和情绪节奏。")
 
