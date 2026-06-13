@@ -1138,23 +1138,18 @@ class ClonePersonalityPlugin(Star):
             return
 
         active = get_active_persona()
-        title = f"📋 群 {group_filter} 的人格列表：" if group_filter else "📋 已克隆的人格列表："
-        lines = [title, "━━━━━━━━━━━━━━━━"]
+        title = f"📋 群 {group_filter} 人格" if group_filter else "📋 已克隆人格"
+        lines = [title]
         for pid, data in filtered.items():
             marker = " 👈 当前" if pid == active else ""
-            user_name = data.get("user_name", "未知")
             user_id = data.get("user_id", "")
             name = data.get(
-                "persona_name",
-                self._build_persona_display_name(data.get("group_id", ""), user_name, user_id),
+                "user_name",
+                pid,
             )
             msg_cnt = data.get("message_count", 0)
-            created = data.get("created_at", "")[:10]
-            gid = data.get("group_id", "")
-            lines.append(f"🆔 {pid}{marker}")
-            lines.append(f"   👤 {name} | QQ {user_id or '未知'} | 📊 {msg_cnt}条 | 📅 {created}")
-        lines.append("━━━━━━━━━━━━━━━━")
-        lines.append("💡 使用「人格切换 <人格ID>」切换人格")
+            lines.append(f"{marker} {pid} | QQ {user_id or '未知'} | {msg_cnt}条")
+        lines.append("切换：人格切换 <ID>")
 
         yield event.plain_result("\n".join(lines))
 
