@@ -33,6 +33,8 @@ def _resolve_data_dir() -> str:
         base_dir = env_data_dir
     elif os.path.isdir("/AstrBot/data") or PLUGIN_DIR.startswith("/AstrBot/"):
         base_dir = "/AstrBot/data"
+    elif f"{os.sep}plugins{os.sep}" in PLUGIN_DIR:
+        base_dir = PLUGIN_DIR.split(f"{os.sep}plugins{os.sep}", 1)[0]
     else:
         base_dir = os.path.join(PLUGIN_DIR, "data")
 
@@ -317,7 +319,10 @@ class ClonePersonalityPlugin(Star):
             updated = await self._refresh_personality(pid, data)
             if not updated:
                 continue
-            personalities[pid] = updated
+            canonical_id = updated.get("persona_id", pid)
+            if canonical_id != pid:
+                personalities.pop(pid, None)
+            personalities[canonical_id] = updated
             group_id = str(updated.get("group_id", ""))
             name = updated.get("user_name", pid)
             updated_by_group.setdefault(group_id, []).append(str(name))
@@ -369,16 +374,23 @@ class ClonePersonalityPlugin(Star):
             personality = self._merge_personality_update(data, personality)
             personality["user_id"] = str(user_id)
             personality["user_name"] = target_name
-            personality["persona_name"] = data.get("persona_name", f"{group_id}{target_name}")
+            personality["persona_name"] = data.get(
+                "persona_name",
+                self._build_persona_display_name(group_id, target_name, user_id),
+            )
             personality["group_id"] = str(group_id)
             personality["created_at"] = data.get("created_at", datetime.now().isoformat())
             personality["updated_at"] = datetime.now().isoformat()
             personality["last_auto_update_at"] = datetime.now().isoformat()
             personality["update_mode"] = "incremental"
             personality["message_count"] = len(messages)
+            personality = self._normalize_personality_metadata(pid, personality, group_id)
 
             personalities = load_personalities()
-            personalities[pid] = personality
+            canonical_id = personality.get("persona_id", pid)
+            if canonical_id != pid:
+                personalities.pop(pid, None)
+            personalities[canonical_id] = personality
             save_personalities(personalities)
 
             await self._inject_to_astrbot_persona(self._last_event, personality, target_name)
@@ -425,9 +437,75 @@ class ClonePersonalityPlugin(Star):
         if not base or base.startswith("QQ"):
             base = str(target_uid)
         base = base.lstrip("@").strip()
-        # AstrBot persona_id 是唯一 ID，避免空格和路径类字符带来配置/命令歧义。
+        # AstrBot persona_id 是全局唯一 ID；同一个 QQ 用户在不同群共享同一人格。
         base = re.sub(r"[\\/:*?\"<>|\s]+", "_", base)
-        return base or str(target_uid)
+        uid = str(target_uid or "").strip()
+        if uid.isdigit():
+            return f"{base or uid}_{uid}"
+        return base or uid
+
+    def _build_persona_display_name(self, group_id: Any, target_name: str,
+                                    target_uid: Any) -> str:
+        persona_id = self._build_persona_id(target_name, target_uid)
+        group_text = str(group_id or "").strip()
+        return f"{group_text}-{persona_id}" if group_text else persona_id
+
+    def _resolve_personality_id(self, personalities: Dict[str, Dict],
+                                arg: str,
+                                group_id: Optional[Any] = None) -> Optional[str]:
+        arg = str(arg or "").strip()
+        if not arg:
+            return None
+        if arg in personalities:
+            return arg
+
+        group_text = str(group_id or "").strip()
+        matches = []
+        for pid, data in personalities.items():
+            if group_text and str(data.get("group_id", "")).strip() != group_text:
+                continue
+
+            user_name = str(data.get("user_name", "") or "").strip()
+            user_id = str(data.get("user_id", "") or "").strip()
+            canonical = self._build_persona_id(user_name or pid, user_id or pid)
+            candidates = {
+                pid,
+                canonical,
+                user_name,
+                user_id,
+                str(data.get("persona_name", "") or "").strip(),
+                str(data.get("display_name", "") or "").strip(),
+                str(data.get("astrbot_persona_id", "") or "").strip(),
+            }
+            legacy_ids = data.get("legacy_persona_ids", [])
+            if isinstance(legacy_ids, list):
+                candidates.update(str(item).strip() for item in legacy_ids)
+            if arg in {item for item in candidates if item}:
+                matches.append(canonical if canonical in personalities else pid)
+
+        return matches[0] if len(set(matches)) == 1 else None
+
+    def _normalize_personality_metadata(self, pid: str, data: Dict,
+                                        group_id: Optional[Any] = None) -> Dict:
+        if not isinstance(data, dict):
+            data = {}
+        user_name = str(data.get("user_name", "") or pid).strip()
+        user_id = str(data.get("user_id", "") or "").strip()
+        canonical = self._build_persona_id(user_name, user_id or pid)
+        group_text = str(group_id if group_id is not None else data.get("group_id", "")).strip()
+        legacy_ids = data.get("legacy_persona_ids", [])
+        if not isinstance(legacy_ids, list):
+            legacy_ids = []
+        for old_id in (pid, data.get("astrbot_persona_id")):
+            old_id = str(old_id or "").strip()
+            if old_id and old_id != canonical and old_id not in legacy_ids:
+                legacy_ids.append(old_id)
+        data["persona_id"] = canonical
+        data["astrbot_persona_id"] = canonical
+        data["display_name"] = canonical
+        data["persona_name"] = self._build_persona_display_name(group_text, user_name, user_id or pid)
+        data["legacy_persona_ids"] = legacy_ids
+        return data
 
     def _get_event_group_id(self, event: AstrMessageEvent) -> Optional[str]:
         """兼容不同 AstrBot/适配器版本的群号位置。"""
@@ -541,10 +619,22 @@ class ClonePersonalityPlugin(Star):
 
     def _get_session_active_persona(self, event: AstrMessageEvent) -> Optional[str]:
         sessions = load_active_sessions()
+        personalities = load_personalities()
+        changed = False
         for key in self._get_session_keys(event):
             persona_id = sessions.get(key)
             if persona_id:
-                return persona_id
+                resolved = self._resolve_personality_id(
+                    personalities,
+                    persona_id,
+                    self._get_event_group_id(event),
+                )
+                if resolved and resolved != persona_id:
+                    sessions[key] = resolved
+                    changed = True
+                if changed:
+                    save_active_sessions(sessions)
+                return resolved or persona_id
         return None
 
     def _set_session_active_persona(self, event: AstrMessageEvent,
@@ -683,7 +773,7 @@ class ClonePersonalityPlugin(Star):
                 return
 
             pid = self._build_persona_id(target_name, target_uid)
-            persona_name = f"{group_id}{target_name}"
+            persona_name = self._build_persona_display_name(group_id, target_name, target_uid)
 
         else:
             # 私聊模式：克隆 <群号> <群友QQ/@群友>
@@ -743,14 +833,14 @@ class ClonePersonalityPlugin(Star):
 
             group_id = str(int(group_id))  # 标准化
             pid = self._build_persona_id(target_name, target_uid)
-            persona_name = f"{group_id}{target_name}"
+            persona_name = self._build_persona_display_name(group_id, target_name, target_uid)
 
         # ── 同名同人默认增量更新；-f/--force 强制从零重建 ──
         personalities = load_personalities()
-        existing_personality = personalities.get(pid)
+        existing_pid = self._resolve_personality_id(personalities, pid, group_id) or pid
+        existing_personality = personalities.get(existing_pid)
         same_saved_person = (
             isinstance(existing_personality, dict)
-            and str(existing_personality.get("group_id", "")) == str(group_id)
             and str(existing_personality.get("user_id", "")) == str(target_uid)
         )
         incremental_update = bool(same_saved_person and not force_refresh)
@@ -842,7 +932,10 @@ class ClonePersonalityPlugin(Star):
         personality["updated_at"] = datetime.now().isoformat()
         personality["update_mode"] = "incremental" if incremental_update else "full"
         personality["message_count"] = len(messages)
+        personality = self._normalize_personality_metadata(pid, personality, group_id)
 
+        if existing_pid != pid:
+            personalities.pop(existing_pid, None)
         personalities[pid] = personality
         save_personalities(personalities)
 
@@ -946,24 +1039,33 @@ class ClonePersonalityPlugin(Star):
             return
 
         personalities = load_personalities()
-        if arg not in personalities:
+        pid = self._resolve_personality_id(
+            personalities,
+            arg,
+            self._get_event_group_id(event),
+        )
+        if not pid:
             yield event.plain_result(f"❌ 未找到人格「{arg}」，使用「人格列表」查看所有人格。")
             return
 
-        set_active_persona(arg)
-        self._set_session_active_persona(event, arg)
-        target_name = personalities[arg].get("user_name", arg)
-        summary_text = personalities[arg].get("summary", "")
+        personality = self._normalize_personality_metadata(pid, personalities[pid])
+        personalities[pid] = personality
+        save_personalities(personalities)
+
+        set_active_persona(pid)
+        self._set_session_active_persona(event, pid)
+        target_name = personality.get("user_name", pid)
+        summary_text = personality.get("summary", "")
 
         success = await self._inject_to_astrbot_persona(
-            event, personalities[arg], target_name
+            event, personality, target_name
         )
         if success:
-            success = await self._bind_current_conversation_persona(event, arg)
+            success = await self._bind_current_conversation_persona(event, pid)
 
         if success:
             yield event.plain_result(
-                f"🔄 已切换至人格「{target_name}」({arg})\n"
+                f"🔄 已切换至人格「{target_name}」({pid})\n"
                 f"━━━━━━━━━━━━━━━━\n"
                 f"{summary_text}\n"
                 f"━━━━━━━━━━━━━━━━\n"
@@ -971,7 +1073,7 @@ class ClonePersonalityPlugin(Star):
             )
         else:
             yield event.plain_result(
-                f"🔄 已切换至人格「{target_name}」({arg})\n"
+                f"🔄 已切换至人格「{target_name}」({pid})\n"
                 f"{summary_text}\n"
                 f"⚠️ 未注入系统设定，仅在对话中参考此人格风格。"
             )
@@ -1020,12 +1122,17 @@ class ClonePersonalityPlugin(Star):
         lines = [title, "━━━━━━━━━━━━━━━━"]
         for pid, data in filtered.items():
             marker = " 👈 当前" if pid == active else ""
-            name = data.get("persona_name", data.get("user_name", "未知"))
+            user_name = data.get("user_name", "未知")
+            user_id = data.get("user_id", "")
+            name = data.get(
+                "persona_name",
+                self._build_persona_display_name(data.get("group_id", ""), user_name, user_id),
+            )
             msg_cnt = data.get("message_count", 0)
             created = data.get("created_at", "")[:10]
             gid = data.get("group_id", "")
             lines.append(f"🆔 {pid}{marker}")
-            lines.append(f"   👤 {name} | 群 {gid} | 📊 {msg_cnt}条 | 📅 {created}")
+            lines.append(f"   👤 {name} | QQ {user_id or '未知'} | 📊 {msg_cnt}条 | 📅 {created}")
         lines.append("━━━━━━━━━━━━━━━━")
         lines.append("💡 使用「人格切换 <人格ID>」切换人格")
 
@@ -1056,9 +1163,15 @@ class ClonePersonalityPlugin(Star):
 
         pid = parts[1].strip()
         personalities = load_personalities()
-        if pid not in personalities:
+        resolved_pid = self._resolve_personality_id(
+            personalities,
+            pid,
+            self._get_event_group_id(event),
+        )
+        if not resolved_pid:
             yield event.plain_result(f"❌ 未找到人格「{pid}」")
             return
+        pid = resolved_pid
 
         data = personalities[pid]
         active = get_active_persona()
@@ -1134,10 +1247,10 @@ class ClonePersonalityPlugin(Star):
             return
 
         personalities = load_personalities()
-        existing = personalities.get(persona_id)
+        existing_pid = self._resolve_personality_id(personalities, persona_id, group_id)
+        existing = personalities.get(existing_pid) if existing_pid else None
         if group_id:
             imported["group_id"] = group_id
-            imported["persona_name"] = f"{group_id}{imported.get('user_name', persona_id)}"
             if (
                 isinstance(existing, dict)
                 and str(existing.get("group_id", "")).strip() == group_id
@@ -1151,15 +1264,22 @@ class ClonePersonalityPlugin(Star):
                 if resolved_user_id:
                     imported["user_id"] = resolved_user_id
 
-        existed = persona_id in personalities
-        personalities[persona_id] = imported
+        canonical_id = self._build_persona_id(
+            imported.get("user_name", persona_id),
+            imported.get("user_id", persona_id),
+        )
+        imported = self._normalize_personality_metadata(canonical_id, imported, group_id)
+        existed = canonical_id in personalities or bool(existing_pid)
+        if existing_pid and existing_pid != canonical_id:
+            personalities.pop(existing_pid, None)
+        personalities[canonical_id] = imported
         save_personalities(personalities)
 
         status = "更新" if existed else "导入"
         group_text = f"群 {group_id} " if group_id else ""
         yield event.plain_result(
-            f"✅ 已{status}{group_text}人格「{persona_id}」到插件列表。\n"
-            f"现在可以使用「人格切换 {persona_id}」。"
+            f"✅ 已{status}{group_text}人格「{canonical_id}」到插件列表。\n"
+            f"现在可以使用「人格切换 {canonical_id}」。"
         )
 
     # ════════════════════════════════════════════════════
@@ -1189,6 +1309,9 @@ class ClonePersonalityPlugin(Star):
             pid = parts[2].strip()
 
         personalities = load_personalities()
+        resolved_pid = self._resolve_personality_id(personalities, pid, group_id)
+        if resolved_pid:
+            pid = resolved_pid
         data = personalities.get(pid)
         if not data:
             yield event.plain_result(f"❌ 未找到人格「{pid}」。")
@@ -1209,6 +1332,11 @@ class ClonePersonalityPlugin(Star):
             )
             if resolved_user_id:
                 data["user_id"] = resolved_user_id
+                new_pid = self._build_persona_id(data.get("user_name", pid), resolved_user_id)
+                data = self._normalize_personality_metadata(new_pid, data, group_id)
+                if new_pid != pid:
+                    personalities.pop(pid, None)
+                    pid = new_pid
                 personalities[pid] = data
                 save_personalities(personalities)
                 user_id_text = resolved_user_id
@@ -1252,9 +1380,15 @@ class ClonePersonalityPlugin(Star):
 
         pid = parts[1].strip()
         personalities = load_personalities()
-        if pid not in personalities:
+        resolved_pid = self._resolve_personality_id(
+            personalities,
+            pid,
+            self._get_event_group_id(event),
+        )
+        if not resolved_pid:
             yield event.plain_result(f"❌ 未找到人格「{pid}」")
             return
+        pid = resolved_pid
 
         name = personalities[pid].get("user_name", pid)
         del personalities[pid]
