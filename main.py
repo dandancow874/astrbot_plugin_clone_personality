@@ -128,8 +128,10 @@ def load_config() -> Dict:
 
 def save_config(config: Dict):
     """保存插件配置"""
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    tmp_file = f"{CONFIG_FILE}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
+    _replace_json_file(tmp_file, CONFIG_FILE)
 
 
 # ─── 人格数据管理 ────────────────────────────────────────
@@ -144,8 +146,10 @@ def load_personalities() -> Dict[str, Dict]:
 
 
 def save_personalities(data: Dict[str, Dict]):
-    with open(PERSONALITIES_FILE, "w", encoding="utf-8") as f:
+    tmp_file = f"{PERSONALITIES_FILE}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    _replace_json_file(tmp_file, PERSONALITIES_FILE)
 
 
 def get_active_persona() -> Optional[str]:
@@ -178,8 +182,21 @@ def load_active_sessions() -> Dict[str, str]:
 
 
 def save_active_sessions(data: Dict[str, str]):
-    with open(ACTIVE_SESSIONS_FILE, "w", encoding="utf-8") as f:
+    tmp_file = f"{ACTIVE_SESSIONS_FILE}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    _replace_json_file(tmp_file, ACTIVE_SESSIONS_FILE)
+
+
+def _replace_json_file(tmp_file: str, target_file: str) -> None:
+    try:
+        os.replace(tmp_file, target_file)
+    except PermissionError:
+        shutil.copy2(tmp_file, target_file)
+        try:
+            os.remove(tmp_file)
+        except OSError:
+            pass
 
 
 # ─── 主插件类 ────────────────────────────────────────────
