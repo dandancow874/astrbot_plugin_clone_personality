@@ -451,22 +451,53 @@ class ClonePersonalityPlugin(Star):
         return None
 
     def _build_persona_id(self, target_name: str, target_uid: Any) -> str:
-        base = str(target_name or "").strip()
-        if not base or base.startswith("QQ"):
-            base = str(target_uid)
-        base = base.lstrip("@").strip()
-        # AstrBot persona_id 是全局唯一 ID；同一个 QQ 用户在不同群共享同一人格。
-        base = re.sub(r"[\\/:*?\"<>|\s]+", "_", base)
+        # QQ 号是人格的稳定唯一标识。群名片可能因群而异，不能参与主键生成，
+        # 否则同一个人在不同群会被错误地创建为多个人格。
         uid = str(target_uid or "").strip()
         if uid.isdigit():
-            return f"{base or uid}_{uid}"
+            return uid
+
+        base = str(target_name or "").strip()
+        if not base:
+            base = uid
+        base = base.lstrip("@").strip()
+        base = re.sub(r"[\\/:*?\"<>|\s]+", "_", base)
         return base or uid
 
     def _build_persona_display_name(self, group_id: Any, target_name: str,
                                     target_uid: Any) -> str:
-        persona_id = self._build_persona_id(target_name, target_uid)
+        uid = str(target_uid or "").strip()
+        name = str(target_name or "").lstrip("@").strip()
+        if name and name not in {uid, f"QQ{uid}"}:
+            display_name = f"{name}_{uid}" if uid else name
+        else:
+            display_name = uid or name
         group_text = str(group_id or "").strip()
-        return f"{group_text}-{persona_id}" if group_text else persona_id
+        return f"{group_text}-{display_name}" if group_text else display_name
+
+    def _find_personality_by_user_id(self, personalities: Dict[str, Dict],
+                                     user_id: Any) -> Optional[str]:
+        """跨群按 QQ 号查找人格；存在旧重复数据时优先取最近更新的一条。"""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return None
+        matches = [
+            (pid, data)
+            for pid, data in personalities.items()
+            if isinstance(data, dict)
+            and str(data.get("user_id", "")).strip() == uid
+        ]
+        if not matches:
+            return None
+        matches.sort(
+            key=lambda item: str(
+                item[1].get("updated_at")
+                or item[1].get("created_at")
+                or ""
+            ),
+            reverse=True,
+        )
+        return matches[0][0]
 
     def _resolve_personality_id(self, personalities: Dict[str, Dict],
                                 arg: str,
@@ -476,6 +507,12 @@ class ClonePersonalityPlugin(Star):
             return None
         if arg in personalities:
             return arg
+
+        # 数字参数视为 QQ 号。QQ 身份是全局的，不受当前群号过滤。
+        if arg.isdigit():
+            matched_by_uid = self._find_personality_by_user_id(personalities, arg)
+            if matched_by_uid:
+                return matched_by_uid
 
         group_text = str(group_id or "").strip()
         matches = []
@@ -520,7 +557,10 @@ class ClonePersonalityPlugin(Star):
                 legacy_ids.append(old_id)
         data["persona_id"] = canonical
         data["astrbot_persona_id"] = canonical
-        data["display_name"] = canonical
+        uid = user_id or str(pid)
+        data["display_name"] = self._build_persona_display_name(
+            None, user_name, uid
+        )
         data["persona_name"] = self._build_persona_display_name(group_text, user_name, user_id or pid)
         data["legacy_persona_ids"] = legacy_ids
         return data
@@ -856,7 +896,12 @@ class ClonePersonalityPlugin(Star):
 
         # ── 同名同人默认增量更新；-f/--force 强制从零重建 ──
         personalities = load_personalities()
-        existing_pid = self._resolve_personality_id(personalities, pid, group_id) or pid
+        # 跨群严格按 QQ 号定位已有记录，不让群名片变化制造重复人格。
+        existing_pid = (
+            self._find_personality_by_user_id(personalities, target_uid)
+            or self._resolve_personality_id(personalities, pid, group_id)
+            or pid
+        )
         existing_personality = personalities.get(existing_pid)
         same_saved_person = (
             isinstance(existing_personality, dict)
@@ -954,10 +999,43 @@ class ClonePersonalityPlugin(Star):
         personality = self._normalize_personality_metadata(pid, personality, group_id)
         personality = self._refresh_runtime_profile(personality)
 
-        if existing_pid != pid:
-            personalities.pop(existing_pid, None)
+        # 收拢历史版本中由不同群名片产生的重复记录，并保留旧 ID 作为别名，
+        # 让已经保存的会话引用可以自动解析到新的 QQ 主键。
+        duplicate_pids = [
+            saved_pid
+            for saved_pid, saved_data in personalities.items()
+            if isinstance(saved_data, dict)
+            and str(saved_data.get("user_id", "")).strip() == str(target_uid)
+            and saved_pid != pid
+        ]
+        legacy_ids = personality.get("legacy_persona_ids", [])
+        if not isinstance(legacy_ids, list):
+            legacy_ids = []
+        for old_pid in duplicate_pids:
+            old_data = personalities.get(old_pid, {})
+            old_legacy_ids = old_data.get("legacy_persona_ids", [])
+            if not isinstance(old_legacy_ids, list):
+                old_legacy_ids = []
+            for legacy_id in [old_pid, *old_legacy_ids]:
+                legacy_id = str(legacy_id or "").strip()
+                if legacy_id and legacy_id != pid and legacy_id not in legacy_ids:
+                    legacy_ids.append(legacy_id)
+            personalities.pop(old_pid, None)
+        personality["legacy_persona_ids"] = legacy_ids
         personalities[pid] = personality
         save_personalities(personalities)
+
+        if duplicate_pids:
+            sessions = load_active_sessions()
+            sessions_changed = False
+            for session_key, active_pid in list(sessions.items()):
+                if active_pid in duplicate_pids:
+                    sessions[session_key] = pid
+                    sessions_changed = True
+            if sessions_changed:
+                save_active_sessions(sessions)
+            if get_active_persona() in duplicate_pids:
+                set_active_persona(pid)
 
         # ── 判断是否注入设定 ──
         admin_only = bool(self._get_setting("admin_only_inject", True))
@@ -1148,7 +1226,9 @@ class ClonePersonalityPlugin(Star):
                 pid,
             )
             msg_cnt = data.get("message_count", 0)
-            lines.append(f"{marker} {pid} | QQ {user_id or '未知'} | {msg_cnt}条")
+            lines.append(
+                f"{marker} {name} | QQ {user_id or '未知'} | {msg_cnt}条"
+            )
         lines.append("切换：人格切换 <ID>")
 
         yield event.plain_result("\n".join(lines))
@@ -2016,6 +2096,15 @@ class ClonePersonalityPlugin(Star):
 
         persona_id = self._get_session_active_persona(event)
         if not persona_id:
+            return
+        # 主动人格回复使用的是独立的纯文本 LLM 请求（见 _call_llm），无法
+        # 安全复用 AstrBot 已解析好的图片输入。图片消息必须交回 AstrBot 的
+        # 原生多模态链路；apply_active_persona_to_llm 仍会负责注入人格。
+        if self._event_has_image(event):
+            logger.info(
+                f"人格主动回复跳过图片消息，交由 AstrBot 多模态链路: "
+                f"{self._get_session_keys(event)}"
+            )
             return
         if self._should_skip_persona_for_task(event):
             logger.info(f"人格主动回复跳过工具/图片任务: {self._get_session_keys(event)}")
