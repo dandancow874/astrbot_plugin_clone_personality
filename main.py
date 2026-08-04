@@ -1127,9 +1127,16 @@ class ClonePersonalityPlugin(Star):
         arg = parts[1].strip()
 
         if arg.lower() in ("default", "默认"):
+            astrbot_unbound = await self._unbind_current_conversation_persona(event)
             set_active_persona(None)
             self._set_session_active_persona(event, None)
-            yield event.plain_result("🔄 已恢复为默认人格。")
+            if astrbot_unbound:
+                yield event.plain_result("🔄 已解除当前会话的人格绑定，恢复为默认人格。")
+            else:
+                yield event.plain_result(
+                    "⚠️ 已清除插件会话人格，但未能解除 AstrBot 当前对话的人格绑定。\n"
+                    "请查看日志，或在 AstrBot 中新建/重置当前对话。"
+                )
             return
 
         if arg.lower() in ("list", "列表"):
@@ -2818,6 +2825,39 @@ class ClonePersonalityPlugin(Star):
             return True
         except Exception as e:
             logger.warning(f"绑定当前会话人格失败: {e}")
+            return False
+
+    async def _unbind_current_conversation_persona(self,
+                                                   event: AstrMessageEvent) -> bool:
+        """解除 AstrBot 当前对话的人格绑定，使其重新使用默认人格。"""
+        if not hasattr(self.context, "conversation_manager"):
+            logger.warning("ConversationManager 不可用，无法恢复默认人格")
+            return False
+
+        try:
+            conv_mgr = self.context.conversation_manager
+            uid = event.unified_msg_origin
+            current_cid = await self._maybe_await(
+                conv_mgr.get_curr_conversation_id(uid)
+            )
+            if not current_cid:
+                # 当前没有 AstrBot 对话，自然也不存在残留的人格绑定。
+                logger.info(f"当前会话没有活动对话，无需解除人格绑定: {uid}")
+                return True
+
+            # AstrBot Conversation.persona_id 的默认值是空字符串；传 None 在部分
+            # 数据库实现中表示“不更新该字段”，因此这里必须显式传入 ""。
+            await self._maybe_await(
+                conv_mgr.update_conversation(
+                    unified_msg_origin=uid,
+                    conversation_id=current_cid,
+                    persona_id="",
+                )
+            )
+            logger.info(f"已解除当前会话人格绑定: {uid}")
+            return True
+        except Exception as e:
+            logger.warning(f"解除当前会话人格绑定失败: {e}")
             return False
 
     def _build_persona_text(self, personality: Dict, target_name: str) -> str:

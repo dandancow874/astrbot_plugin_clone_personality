@@ -1,7 +1,7 @@
 name: clone_personality
 desc: "群友人格克隆插件 - 提取群友聊天记录，通过大模型克隆人格，可注入AstrBot人格系统"
 author: "AstrBot Plugin"
-version: "1.1.0"
+version: "1.1.1"
 repo: "https://github.com/dandancow874/astrbot_plugin_clone_personality"
 branch: "main"
 attention:
